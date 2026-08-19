@@ -136,7 +136,90 @@ rodoviasRouter.get('/:br/:uf', async (req: Request, res: Response) => {
   }
 });
 
-/* ── Importar rodovias em massa (admin) ── */
+/* ── Registrar/atualizar versão SNV no catálogo ── */
+rodoviasRouter.post('/versoes', async (req: Request, res: Response) => {
+  try {
+    const importKey = req.headers['x-import-key'] as string;
+    const serverKey = process.env.IMPORT_KEY;
+    if (!serverKey || importKey !== serverKey) {
+      res.status(403).json({ error: 'Chave de importação inválida.' });
+      return;
+    }
+    const { id, label, arquivo_dnit, total_rodovias, status } = req.body;
+    if (!id) { res.status(400).json({ error: 'id é obrigatório.' }); return; }
+
+    await pool.query(`
+      INSERT INTO snv_versoes (id, label, arquivo_dnit, total_rodovias, status)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (id) DO UPDATE SET
+        label = COALESCE(EXCLUDED.label, snv_versoes.label),
+        arquivo_dnit = COALESCE(EXCLUDED.arquivo_dnit, snv_versoes.arquivo_dnit),
+        total_rodovias = COALESCE(EXCLUDED.total_rodovias, snv_versoes.total_rodovias),
+        status = COALESCE(EXCLUDED.status, snv_versoes.status)
+    `, [id, label || id, arquivo_dnit || '', total_rodovias || 0, status || 'concluido']);
+
+    res.json({ ok: true });
+  } catch (err: any) {
+    console.error('Erro ao registrar versão:', err);
+    res.status(500).json({ error: 'Erro ao registrar versão.' });
+  }
+});
+
+/* ── Importar rodovias via chave de importação (scripts locais) ── */
+rodoviasRouter.post('/import', async (req: Request, res: Response) => {
+  try {
+    const importKey = req.headers['x-import-key'] as string;
+    const serverKey = process.env.IMPORT_KEY;
+    if (!serverKey || importKey !== serverKey) {
+      res.status(403).json({ error: 'Chave de importação inválida. Defina IMPORT_KEY no .env do servidor.' });
+      return;
+    }
+
+    const { rodovias, versao_snv } = req.body as {
+      versao_snv: string;
+      rodovias: Array<{
+        br: string; uf: string; fonte?: string;
+        km_min: number; km_max: number;
+        lat: number[]; lon: number[]; km: number[];
+      }>;
+    };
+
+    if (!versao_snv) { res.status(400).json({ error: 'versao_snv é obrigatório.' }); return; }
+    if (!Array.isArray(rodovias) || !rodovias.length) { res.status(400).json({ error: 'Envie { versao_snv, rodovias: [...] }' }); return; }
+
+    const client = await pool.connect();
+    let inseridas = 0;
+    try {
+      await client.query('BEGIN');
+      for (const rod of rodovias) {
+        const snv = versao_snv.toLowerCase();
+        const id = `rod-${rod.br}-${rod.uf}-${snv}`;
+        await client.query(`
+          INSERT INTO rodovias (id, br, uf, fonte, km_min, km_max, lat, lon, km, versao_snv, data_atualizacao)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+          ON CONFLICT (id) DO UPDATE SET
+            km_min=EXCLUDED.km_min, km_max=EXCLUDED.km_max,
+            lat=EXCLUDED.lat, lon=EXCLUDED.lon, km=EXCLUDED.km,
+            data_atualizacao=EXCLUDED.data_atualizacao, fonte=EXCLUDED.fonte
+        `, [id, rod.br, rod.uf, rod.fonte || 'SNV/DNIT', rod.km_min, rod.km_max,
+            rod.lat, rod.lon, rod.km, snv]);
+        inseridas++;
+      }
+      await client.query('COMMIT');
+      res.json({ ok: true, inseridas, total: rodovias.length });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err: any) {
+    console.error('Erro no import:', err);
+    res.status(500).json({ error: 'Erro ao importar rodovias.' });
+  }
+});
+
+/* ── Importar rodovias em massa (admin autenticado) ── */
 rodoviasRouter.post('/bulk', requireAuth, requireAdmin, async (req: Request, res: Response) => {
   try {
     const { rodovias, versao_snv } = req.body as {

@@ -39,6 +39,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-controlcheck}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-controlcheck}
       JWT_SECRET: ${JWT_SECRET:?Defina JWT_SECRET no .env}
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      IMPORT_KEY: ${IMPORT_KEY:-controlcheck-snv-import-2026}
     volumes:
       - uploads:/app/uploads
     ports:
