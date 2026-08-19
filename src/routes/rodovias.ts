@@ -2,10 +2,12 @@
  * Rotas de rodovias (SNV) — /api/rodovias
  * Compartilhado entre KMCheck e ControlCheck
  *
- * GET /api/rodovias            — lista todas as rodovias disponíveis (br, uf, km_min, km_max)
- * GET /api/rodovias/:br        — lista UFs de uma BR
- * GET /api/rodovias/:br/:uf    — retorna geometria completa (lat, lon, km)
- * POST /api/rodovias/bulk      — importar rodovias em massa (admin)
+ * GET  /api/rodovias                — lista rodovias (sem geometria)
+ * GET  /api/rodovias/versoes        — lista versões do SNV disponíveis
+ * GET  /api/rodovias/:br            — UFs de uma BR
+ * GET  /api/rodovias/:br/:uf        — geometria completa (?snv=202504a)
+ * GET  /api/rodovias/:br/:uf/versoes — versões disponíveis para uma BR/UF
+ * POST /api/rodovias/bulk           — importar rodovias em massa (admin)
  */
 import { Router, Request, Response } from 'express';
 import { query, queryOne, pool } from '../db.js';
@@ -13,13 +15,43 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js';
 
 export const rodoviasRouter = Router();
 
-/* ── Lista de rodovias (sem geometria — leve) ── */
-rodoviasRouter.get('/', async (_req: Request, res: Response) => {
+/* ── Lista versões do SNV disponíveis ── */
+rodoviasRouter.get('/versoes', async (_req: Request, res: Response) => {
   try {
     const rows = await query(
-      `SELECT id, br, uf, km_min, km_max, fonte, versao_snv, data_atualizacao
-       FROM rodovias ORDER BY br, uf`
+      `SELECT id, label, data_publicacao, arquivo_dnit, total_rodovias, status, created_at
+       FROM snv_versoes
+       ORDER BY id DESC`
     );
+    res.json(rows);
+  } catch (err: any) {
+    // Se a tabela não existe ainda, retorna lista vazia
+    if (err.code === '42P01') { res.json([]); return; }
+    res.status(500).json({ error: 'Erro ao listar versões SNV.' });
+  }
+});
+
+/* ── Lista de rodovias (sem geometria — leve) ── */
+rodoviasRouter.get('/', async (req: Request, res: Response) => {
+  try {
+    const snv = (req.query.snv as string) || '';
+    let sql: string;
+    let params: any[];
+
+    if (snv) {
+      // Rodovias de uma versão específica
+      sql = `SELECT id, br, uf, km_min, km_max, fonte, versao_snv, data_atualizacao
+             FROM rodovias WHERE versao_snv = $1 ORDER BY br, uf`;
+      params = [snv.toLowerCase()];
+    } else {
+      // Retorna a versão mais recente de cada rodovia
+      sql = `SELECT DISTINCT ON (br, uf)
+               id, br, uf, km_min, km_max, fonte, versao_snv, data_atualizacao
+             FROM rodovias
+             ORDER BY br, uf, versao_snv DESC`;
+      params = [];
+    }
+    const rows = await query(sql, params);
     res.json(rows);
   } catch (err: any) {
     res.status(500).json({ error: 'Erro ao listar rodovias.' });
@@ -29,29 +61,73 @@ rodoviasRouter.get('/', async (_req: Request, res: Response) => {
 /* ── UFs de uma BR ── */
 rodoviasRouter.get('/:br', async (req: Request, res: Response) => {
   try {
-    const br = req.params.br as string;
-    const rows = await query(
-      `SELECT id, br, uf, km_min, km_max, fonte, versao_snv
-       FROM rodovias WHERE br = $1 ORDER BY uf`,
-      [br.toUpperCase()]
-    );
+    const br = (req.params.br as string).replace(/\D/g, '').padStart(3, '0');
+    const snv = (req.query.snv as string) || '';
+
+    let sql: string;
+    let params: any[];
+
+    if (snv) {
+      sql = `SELECT id, br, uf, km_min, km_max, fonte, versao_snv
+             FROM rodovias WHERE br = $1 AND versao_snv = $2 ORDER BY uf`;
+      params = [br, snv.toLowerCase()];
+    } else {
+      sql = `SELECT DISTINCT ON (uf)
+               id, br, uf, km_min, km_max, fonte, versao_snv
+             FROM rodovias WHERE br = $1
+             ORDER BY uf, versao_snv DESC`;
+      params = [br];
+    }
+    const rows = await query(sql, params);
     res.json(rows);
   } catch (err: any) {
     res.status(500).json({ error: 'Erro ao buscar rodovia.' });
   }
 });
 
+/* ── Versões disponíveis para uma BR/UF ── */
+rodoviasRouter.get('/:br/:uf/versoes', async (req: Request, res: Response) => {
+  try {
+    const br = (req.params.br as string).replace(/\D/g, '').padStart(3, '0');
+    const uf = (req.params.uf as string).toUpperCase();
+
+    const rows = await query(
+      `SELECT r.versao_snv, r.km_min, r.km_max, r.data_atualizacao,
+              v.label, v.data_publicacao
+       FROM rodovias r
+       LEFT JOIN snv_versoes v ON v.id = r.versao_snv
+       WHERE r.br = $1 AND r.uf = $2
+       ORDER BY r.versao_snv DESC`,
+      [br, uf]
+    );
+    res.json(rows);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Erro ao buscar versões.' });
+  }
+});
+
 /* ── Geometria completa de uma BR/UF ── */
 rodoviasRouter.get('/:br/:uf', async (req: Request, res: Response) => {
   try {
-    const br = req.params.br as string;
-    const uf = req.params.uf as string;
-    const row = await queryOne(
-      `SELECT * FROM rodovias WHERE br = $1 AND uf = $2 LIMIT 1`,
-      [br.toUpperCase(), uf.toUpperCase()]
-    );
+    const br = (req.params.br as string).replace(/\D/g, '').padStart(3, '0');
+    const uf = (req.params.uf as string).toUpperCase();
+    const snv = (req.query.snv as string) || '';
+
+    let sql: string;
+    let params: any[];
+
+    if (snv) {
+      sql = `SELECT * FROM rodovias WHERE br = $1 AND uf = $2 AND versao_snv = $3 LIMIT 1`;
+      params = [br, uf, snv.toLowerCase()];
+    } else {
+      // Pega a versão mais recente
+      sql = `SELECT * FROM rodovias WHERE br = $1 AND uf = $2
+             ORDER BY versao_snv DESC LIMIT 1`;
+      params = [br, uf];
+    }
+    const row = await queryOne(sql, params);
     if (!row) {
-      res.status(404).json({ error: `Rodovia ${br}-${uf} não encontrada.` });
+      res.status(404).json({ error: `Rodovia BR-${br}/${uf}${snv ? ' (SNV ' + snv + ')' : ''} não encontrada.` });
       return;
     }
     res.json(row);
@@ -63,7 +139,8 @@ rodoviasRouter.get('/:br/:uf', async (req: Request, res: Response) => {
 /* ── Importar rodovias em massa (admin) ── */
 rodoviasRouter.post('/bulk', requireAuth, requireAdmin, async (req: Request, res: Response) => {
   try {
-    const { rodovias } = req.body as {
+    const { rodovias, versao_snv } = req.body as {
+      versao_snv?: string;
       rodovias: Array<{
         br: string;
         uf: string;
@@ -90,30 +167,21 @@ rodoviasRouter.post('/bulk', requireAuth, requireAdmin, async (req: Request, res
       await client.query('BEGIN');
 
       for (const rod of rodovias) {
-        /* Verificar se já existe */
-        const existing = await client.query(
-          `SELECT id FROM rodovias WHERE br = $1 AND uf = $2 LIMIT 1`,
-          [rod.br, rod.uf]
-        );
+        const snv = (rod.versao_snv || versao_snv || '').toLowerCase();
+        const id = `rod-${rod.br}-${rod.uf}-${snv}`;
 
-        if (existing.rows.length === 0) {
-          await client.query(
-            `INSERT INTO rodovias (br, uf, fonte, km_min, km_max, lat, lon, km, versao_snv, data_atualizacao)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
-            [rod.br, rod.uf, rod.fonte || 'SNV/DNIT', rod.km_min, rod.km_max,
-             rod.lat, rod.lon, rod.km, rod.versao_snv || '']
-          );
-          inseridas++;
-        } else {
-          await client.query(
-            `UPDATE rodovias SET km_min=$1, km_max=$2, lat=$3, lon=$4, km=$5,
-             versao_snv=$6, data_atualizacao=NOW(), fonte=$7
-             WHERE br=$8 AND uf=$9`,
-            [rod.km_min, rod.km_max, rod.lat, rod.lon, rod.km,
-             rod.versao_snv || '', rod.fonte || 'SNV/DNIT', rod.br, rod.uf]
-          );
-          atualizadas++;
-        }
+        await client.query(`
+          INSERT INTO rodovias (id, br, uf, fonte, km_min, km_max, lat, lon, km, versao_snv, data_atualizacao)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+          ON CONFLICT (id) DO UPDATE SET
+            km_min = EXCLUDED.km_min, km_max = EXCLUDED.km_max,
+            lat = EXCLUDED.lat, lon = EXCLUDED.lon, km = EXCLUDED.km,
+            versao_snv = EXCLUDED.versao_snv, data_atualizacao = EXCLUDED.data_atualizacao,
+            fonte = EXCLUDED.fonte
+        `, [id, rod.br, rod.uf, rod.fonte || 'SNV/DNIT', rod.km_min, rod.km_max,
+            rod.lat, rod.lon, rod.km, snv]);
+
+        inseridas++;
       }
 
       await client.query('COMMIT');

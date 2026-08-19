@@ -80,7 +80,8 @@ async function main() {
           }
         }
 
-        const id = `rod-${br}-${uf}`;
+        const snvId = (snv || '').toLowerCase();
+        const id = `rod-${br}-${uf}-${snvId}`;
 
         // UPSERT
         await client.query(`
