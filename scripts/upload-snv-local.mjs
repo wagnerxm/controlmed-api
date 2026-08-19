@@ -5,17 +5,24 @@
  * via HTTPS para a API no servidor.
  *
  * Uso:
- *   node scripts/upload-snv-local.mjs                          # todas as versões
- *   node scripts/upload-snv-local.mjs --only 202504a,202501a   # versões específicas
- *   node scripts/upload-snv-local.mjs --only 202504a --batch 20 # 20 rodovias por request
+ *   node scripts/upload-snv-local.mjs                            # baixa TUDO do DNIT Cloud
+ *   node scripts/upload-snv-local.mjs --only 202504a,202501a     # versões específicas
+ *   node scripts/upload-snv-local.mjs --folder "D:\SNV ZIPs"     # processa ZIPs já baixados
+ *   node scripts/upload-snv-local.mjs --file 202504A.zip --version 202504a  # um ZIP específico
+ *   node scripts/upload-snv-local.mjs --batch 20                 # 20 rodovias por request
+ *
+ * Download em streaming com progresso (não carrega tudo na memória).
+ * Pula versões já processadas no servidor automaticamente.
  *
  * Requer: IMPORT_KEY no .env do servidor (mesma chave usada aqui)
  */
 
-import { writeFileSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync, existsSync, rmSync, createWriteStream } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TMP = join(__dirname, '..', '.tmp-snv-upload');
@@ -35,12 +42,18 @@ const onlyIdx = args.indexOf('--only');
 const onlyFilter = onlyIdx >= 0 ? args[onlyIdx + 1]?.split(',').map(s => s.trim().toLowerCase()) : null;
 const batchIdx = args.indexOf('--batch');
 const BATCH_SIZE = batchIdx >= 0 ? parseInt(args[batchIdx + 1]) || 10 : 10;
+const fileIdx = args.indexOf('--file');
+const LOCAL_FILE = fileIdx >= 0 ? args[fileIdx + 1] : null;
+const versionIdx = args.indexOf('--version');
+const LOCAL_VERSION = versionIdx >= 0 ? args[versionIdx + 1]?.toLowerCase() : null;
+const folderIdx = args.indexOf('--folder');
+const LOCAL_FOLDER = folderIdx >= 0 ? args[folderIdx + 1] : null;
 
 // ── Fetch com retry ──
 async function fetchRetry(url, opts = {}, attempts = 4) {
   for (let i = 1; i <= attempts; i++) {
     try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(300000), ...opts });
+      const r = await fetch(url, { signal: AbortSignal.timeout(600000), ...opts });
       return r;
     } catch (e) {
       if (i === attempts) throw e;
@@ -66,16 +79,28 @@ async function listShpFiles() {
     .sort();
 }
 
-// ── Baixar ZIP do DNIT ──
+// ── Baixar ZIP do DNIT com streaming (não carrega tudo na memória) ──
 async function downloadZip(filename, dest) {
   const url = `${WEBDAV}/${encodeURIComponent(SHP_FOLDER)}/${encodeURIComponent(filename)}`;
   console.log(`  📥 Baixando ${filename}...`);
-  const r = await fetchRetry(url, { headers: { 'Authorization': AUTH } });
+  // Timeout longo (30 min) — ZIPs podem ter 200MB+ e o DNIT é lento
+  const r = await fetchRetry(url, { headers: { 'Authorization': AUTH }, signal: AbortSignal.timeout(1800000) }, 3);
   if (!r.ok) throw new Error(`Download ${filename}: HTTP ${r.status}`);
-  const buf = Buffer.from(await r.arrayBuffer());
-  writeFileSync(dest, buf);
-  console.log(`     ${(buf.length / 1024 / 1024).toFixed(1)} MB`);
-  return buf;
+  const total = parseInt(r.headers.get('content-length') || '0');
+  let downloaded = 0;
+  const progress = new TransformStream({
+    transform(chunk, controller) {
+      downloaded += chunk.length;
+      const mb = (downloaded / 1024 / 1024).toFixed(1);
+      const pct = total ? ` (${Math.round(downloaded / total * 100)}%)` : '';
+      process.stdout.write(`     ${mb} MB${pct}\r`);
+      controller.enqueue(chunk);
+    }
+  });
+  const readable = Readable.fromWeb(r.body.pipeThrough(progress));
+  await pipeline(readable, createWriteStream(dest));
+  const mb = (downloaded / 1024 / 1024).toFixed(1);
+  console.log(`     ${mb} MB ✅                    `);
 }
 
 // ── Parsers SHP/DBF ──
@@ -212,18 +237,31 @@ async function processVersion(zipPath, snvId, zipName) {
     execSync(`unzip -o "${zipPath}" -d "${extractDir}"`, { stdio: 'pipe' });
   }
 
-  const { readdirSync } = await import('node:fs');
-  const files = readdirSync(extractDir);
-  const shpFile = files.find(f => f.toLowerCase().endsWith('.shp'));
-  const dbfFile = files.find(f => f.toLowerCase().endsWith('.dbf'));
-  if (!shpFile || !dbfFile) throw new Error('SHP ou DBF não encontrado no ZIP');
+  // Buscar SHP e DBF recursivamente (podem estar em subpasta)
+  const { readdirSync, statSync } = await import('node:fs');
+  function findFiles(dir) {
+    let result = [];
+    for (const f of readdirSync(dir)) {
+      const full = join(dir, f);
+      if (statSync(full).isDirectory()) result = result.concat(findFiles(full));
+      else result.push(full);
+    }
+    return result;
+  }
+  const allFiles = findFiles(extractDir);
+  const shpPath = allFiles.find(f => f.toLowerCase().endsWith('.shp'));
+  const dbfPath = allFiles.find(f => f.toLowerCase().endsWith('.dbf'));
+  if (!shpPath || !dbfPath) {
+    console.error('     Arquivos encontrados:', allFiles.map(f => f.split(/[/\\]/).pop()).join(', '));
+    throw new Error('SHP ou DBF não encontrado no ZIP');
+  }
 
   console.log(`  📊 Parseando DBF...`);
-  const recs = readDbf(readFileSync(join(extractDir, dbfFile)));
+  const recs = readDbf(readFileSync(dbfPath));
   console.log(`     ${recs.length} registros`);
 
   console.log(`  📊 Parseando SHP...`);
-  const geoms = readShp(readFileSync(join(extractDir, shpFile)));
+  const geoms = readShp(readFileSync(shpPath));
 
   // Agrupar por rodovia (só tipo B = eixo principal)
   const roadMap = {};
@@ -299,6 +337,29 @@ async function main() {
     process.exit(1);
   }
 
+  // ── Modo arquivo local: --file <caminho.zip> --version <202504a> ──
+  if (LOCAL_FILE) {
+    if (!LOCAL_VERSION) {
+      console.error('❌ Use --version <id> junto com --file. Ex: --file 202504A.zip --version 202504a');
+      process.exit(1);
+    }
+    if (!existsSync(LOCAL_FILE)) {
+      console.error(`❌ Arquivo não encontrado: ${LOCAL_FILE}`);
+      process.exit(1);
+    }
+    console.log('');
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`📦 Arquivo local: ${LOCAL_FILE}`);
+    console.log(`   Versão: ${LOCAL_VERSION}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    const { sent, totalCoords } = await processVersion(LOCAL_FILE, LOCAL_VERSION, LOCAL_FILE.split(/[/\\]/).pop());
+    console.log(`  ✅ ${LOCAL_VERSION}: ${sent} rodovias, ${totalCoords.toLocaleString()} coordenadas\n`);
+    console.log('╔════════════════════════════════════════════════════╗');
+    console.log('║  ✅ Concluído!                                    ║');
+    console.log('╚════════════════════════════════════════════════════╝');
+    return;
+  }
+
   // Verificar quais versões já estão no servidor
   let existingVersions = new Set();
   try {
@@ -306,8 +367,45 @@ async function main() {
     if (vr.ok) {
       const vers = await vr.json();
       existingVersions = new Set(vers.filter(v => v.status === 'concluido').map(v => v.id));
+      if (existingVersions.size) console.log(`   ${existingVersions.size} versões já no servidor: ${[...existingVersions].join(', ')}`);
     }
   } catch {}
+
+  // ── Modo pasta local: --folder <caminho> (processa todos os ZIPs da pasta) ──
+  if (LOCAL_FOLDER) {
+    const { readdirSync } = await import('node:fs');
+    if (!existsSync(LOCAL_FOLDER)) {
+      console.error(`❌ Pasta não encontrada: ${LOCAL_FOLDER}`);
+      process.exit(1);
+    }
+    const zips = readdirSync(LOCAL_FOLDER)
+      .filter(f => /^\d{6}\w+\.zip$/i.test(f))
+      .sort();
+    console.log(`\n📂 Pasta local: ${LOCAL_FOLDER}`);
+    console.log(`   ${zips.length} ZIPs encontrados\n`);
+
+    let processed = 0, skippedLocal = 0;
+    for (const zipName of zips) {
+      const snvId = zipName.replace('.zip', '').toLowerCase();
+      if (onlyFilter && !onlyFilter.includes(snvId)) continue;
+      if (!onlyFilter && existingVersions.has(snvId)) {
+        console.log(`⏭️  ${snvId} — já processada no servidor`);
+        skippedLocal++;
+        continue;
+      }
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      console.log(`📦 Versão: ${snvId} (${zipName})`);
+      try {
+        const { sent, totalCoords } = await processVersion(join(LOCAL_FOLDER, zipName), snvId, zipName);
+        console.log(`  ✅ ${snvId}: ${sent} rodovias, ${totalCoords.toLocaleString()} coordenadas\n`);
+        processed++;
+      } catch (err) {
+        console.error(`  ❌ Erro em ${snvId}: ${err.message}\n`);
+      }
+    }
+    console.log(`\n✅ Concluído! Processadas: ${processed}, Já existiam: ${skippedLocal}`);
+    return;
+  }
 
   // Listar versões no DNIT Cloud
   console.log('');

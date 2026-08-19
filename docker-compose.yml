@@ -40,6 +40,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?Defina JWT_SECRET no .env}
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
       IMPORT_KEY: ${IMPORT_KEY:-controlcheck-snv-import-2026}
+      SIGO_API_KEY: ${SIGO_API_KEY:-}
     volumes:
       - uploads:/app/uploads
     ports:

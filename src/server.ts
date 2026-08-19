@@ -14,6 +14,10 @@
  * POST /api/rodovias/bulk    — importar rodovias (admin)
  * POST /api/upload/photo     — upload de foto
  * GET  /api/upload/:file     — servir foto
+ * POST /api/siac/resumo      — buscar resumo do contrato via SIGO/SIAC
+ * POST /api/siac/medicao     — buscar medição(ões) via SIGO/SIAC
+ * POST /api/siac/historico   — histórico de medições via SIGO/SIAC
+ * POST /api/siac/consultar   — consulta genérica SIGO/SIAC
  * GET  /api/health           — health check
  */
 import express from 'express';
@@ -23,6 +27,7 @@ import { authRouter } from './routes/auth.js';
 import { syncRouter } from './routes/sync.js';
 import { rodoviasRouter } from './routes/rodovias.js';
 import { uploadRouter } from './routes/upload.js';
+import { siacRouter } from './routes/siac.js';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
@@ -40,6 +45,7 @@ app.use('/api/auth', authRouter);
 app.use('/api/sync', syncRouter);
 app.use('/api/rodovias', rodoviasRouter);
 app.use('/api/upload', uploadRouter);
+app.use('/api/siac', siacRouter);
 
 /* ── Health check ── */
 app.get('/api/health', (_req, res) => {
