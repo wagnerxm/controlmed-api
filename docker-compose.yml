@@ -1,0 +1,77 @@
+##############################################
+# ControlCheck API — Docker Compose
+# Sobe: PostgreSQL + API Node.js + Nginx (HTTPS)
+# Uso: docker compose up -d
+##############################################
+
+services:
+  # ── PostgreSQL ──
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-controlcheck}
+      POSTGRES_USER: ${POSTGRES_USER:-controlcheck}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD no .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./src/migrations/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-controlcheck}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── API Node.js ──
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:-controlcheck}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-controlcheck}
+      JWT_SECRET: ${JWT_SECRET:?Defina JWT_SECRET no .env}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+    volumes:
+      - uploads:/app/uploads
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  # ── Nginx (reverse proxy + HTTPS) ──
+  nginx:
+    image: nginx:alpine
+    restart: always
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - certbot_etc:/etc/letsencrypt:ro
+      - certbot_var:/var/lib/letsencrypt
+      - webroot:/var/www/certbot
+    # Primeiro deploy sem HTTPS; depois roda certbot
+
+  # ── Certbot (HTTPS grátis via Let's Encrypt) ──
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certbot_etc:/etc/letsencrypt
+      - certbot_var:/var/lib/letsencrypt
+      - webroot:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do sleep 12h & wait $${!}; certbot renew --webroot -w /var/www/certbot --quiet; done'"
+
+volumes:
+  pgdata:
+  uploads:
+  certbot_etc:
+  certbot_var:
+  webroot:
