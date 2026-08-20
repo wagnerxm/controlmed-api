@@ -229,6 +229,34 @@ rodoviasRouter.post('/import', async (req: Request, res: Response) => {
   }
 });
 
+/* ── Reset para reimportação (apaga rodovias de uma versão e reseta status) ── */
+rodoviasRouter.post('/reset', async (req: Request, res: Response) => {
+  try {
+    const importKey = req.headers['x-import-key'] as string;
+    const serverKey = process.env.IMPORT_KEY;
+    if (!serverKey || importKey !== serverKey) {
+      res.status(403).json({ error: 'Chave de importação inválida.' });
+      return;
+    }
+    const { versao_snv, all } = req.body as { versao_snv?: string; all?: boolean };
+    if (all) {
+      await pool.query(`DELETE FROM rodovias`);
+      await pool.query(`UPDATE snv_versoes SET status = 'disponivel', total_rodovias = 0`);
+      res.json({ ok: true, message: 'Todas as rodovias apagadas e versões resetadas.' });
+    } else if (versao_snv) {
+      const snv = versao_snv.toLowerCase();
+      await pool.query(`DELETE FROM rodovias WHERE versao_snv = $1`, [snv]);
+      await pool.query(`UPDATE snv_versoes SET status = 'disponivel', total_rodovias = 0 WHERE id = $1`, [snv]);
+      res.json({ ok: true, message: `Versão ${snv} resetada.` });
+    } else {
+      res.status(400).json({ error: 'Informe versao_snv ou all:true.' });
+    }
+  } catch (err: any) {
+    console.error('Erro no reset:', err);
+    res.status(500).json({ error: 'Erro ao resetar.' });
+  }
+});
+
 /* ── Importar rodovias em massa (admin autenticado) ── */
 rodoviasRouter.post('/bulk', requireAuth, requireAdmin, async (req: Request, res: Response) => {
   try {
