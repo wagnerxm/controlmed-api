@@ -318,15 +318,22 @@ export async function buscarUnidadePorUf(
   if (!res.ok || !res.data) return null;
 
   const ufUpper = uf.toUpperCase();
-  const found = res.data.find(
-    (u) =>
-      u.sigla === ufUpper ||
-      u.descricao.includes(`- ${ufUpper} -`) ||
-      u.descricao.includes(`- ${ufUpper}`) ||
-      u.descricao.toUpperCase().includes(ufUpper),
-  );
 
-  return found?.id ?? null;
+  // Prioridade 1: S.R.E exata (Superintendência Regional)
+  const sre = res.data.find(
+    (u) => u.descricao.includes(`S.R.E - ${ufUpper}`) || u.descricao.includes(`S.R.E- ${ufUpper}`),
+  );
+  if (sre) return sre.id;
+
+  // Prioridade 2: sigla exata
+  const bySigla = res.data.find((u) => u.sigla === ufUpper);
+  if (bySigla) return bySigla.id;
+
+  // Prioridade 3: "- UF -" no nome (evita match parcial como "INTERNA" → "RN")
+  const byDash = res.data.find(
+    (u) => u.descricao.includes(`- ${ufUpper} -`) || u.descricao.endsWith(`- ${ufUpper}`),
+  );
+  return byDash?.id ?? null;
 }
 
 /* ══════════════════════════════════════════
