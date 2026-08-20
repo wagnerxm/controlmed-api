@@ -10,7 +10,9 @@
     "dev": "tsx watch src/server.ts"
   },
   "dependencies": {
+    "@types/cheerio": "^0.22.35",
     "bcryptjs": "^2.4.3",
+    "cheerio": "^1.2.0",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "fflate": "^0.8.3",

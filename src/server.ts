@@ -14,10 +14,12 @@
  * POST /api/rodovias/bulk    — importar rodovias (admin)
  * POST /api/upload/photo     — upload de foto
  * GET  /api/upload/:file     — servir foto
- * POST /api/siac/resumo      — buscar resumo do contrato via SIGO/SIAC
- * POST /api/siac/medicao     — buscar medição(ões) via SIGO/SIAC
- * POST /api/siac/historico   — histórico de medições via SIGO/SIAC
- * POST /api/siac/consultar   — consulta genérica SIGO/SIAC
+ * POST /api/siac/contrato-completo  — buscar dados completos (resumo + histórico)
+ * POST /api/siac/resumo             — buscar resumo do contrato via SIGO/SIAC
+ * POST /api/siac/medicao            — buscar medição(ões) via SIGO/SIAC
+ * POST /api/siac/historico          — histórico de medições via SIGO/SIAC
+ * POST /api/siac/ficha-contratual   — ficha contratual via SISDNIT (scraping)
+ * POST /api/siac/consultar          — consulta genérica SIGO/SIAC
  * GET  /api/health           — health check
  */
 import express from 'express';

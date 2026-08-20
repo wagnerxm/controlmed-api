@@ -1,15 +1,18 @@
 /**
  * Rotas de integração SIAC/SIGO — /api/siac
  *
- * POST /api/siac/consultar     — cria consulta no SIGO e aguarda resultado
- * POST /api/siac/resumo        — atalho: busca resumo-contrato e retorna itens
- * POST /api/siac/medicao       — busca medição(ões) do contrato
- * POST /api/siac/historico     — busca histórico de medições
+ * POST /api/siac/consultar          — cria consulta no SIGO e aguarda resultado
+ * POST /api/siac/resumo             — atalho: busca resumo-contrato e retorna itens
+ * POST /api/siac/medicao            — busca medição(ões) do contrato
+ * POST /api/siac/historico          — busca histórico de medições
+ * POST /api/siac/ficha-contratual   — busca ficha contratual direto do SISDNIT (scraping)
  *
  * O SIGO faz proxy ao SIAC/SISDNIT do DNIT usando as credenciais do usuário.
+ * Para a ficha contratual, acessamos o SISDNIT diretamente (o SIGO não expõe esse recurso).
  * A chave de API (SIGO_API_KEY) fica no servidor — nunca exposta ao front.
  */
 import { Router, Request, Response } from 'express';
+import { loginSisdnit, buscarFichaContratual } from '../lib/sisdnit-scraper.js';
 
 export const siacRouter = Router();
 
@@ -152,6 +155,63 @@ siacRouter.post('/resumo', async (req: Request, res: Response) => {
 });
 
 /* ══════════════════════════════════════════
+   POST /api/siac/contrato-completo
+   Busca resumo + histórico em paralelo e retorna dados completos do contrato
+   ══════════════════════════════════════════ */
+siacRouter.post('/contrato-completo', async (req: Request, res: Response) => {
+  const { numero_contrato, fiscalizadora, cpf, senha } = req.body;
+
+  if (!numero_contrato || !fiscalizadora || !cpf || !senha) {
+    res.status(400).json({ error: 'Campos obrigatórios: numero_contrato, fiscalizadora, cpf, senha.' });
+    return;
+  }
+
+  console.log(`[SIAC] Buscando dados completos do contrato ${numero_contrato} (${fiscalizadora})...`);
+
+  /* Buscar resumo, histórico e empenho em paralelo (3 consultas simultâneas) */
+  const [resumoResult, historicoResult, empenhoResult] = await Promise.all([
+    consultarSigo({ tipo: 'resumo-contrato', numero_contrato, fiscalizadora, cpf, senha, formato: 'json' }),
+    consultarSigo({ tipo: 'historico', numero_contrato, fiscalizadora, cpf, senha, formato: 'json' }),
+    consultarSigo({ tipo: 'empenho', numero_contrato, fiscalizadora, cpf, senha, formato: 'json' }),
+  ]);
+
+  if (!resumoResult.ok) {
+    console.log(`[SIAC] Erro no resumo: ${resumoResult.error}`);
+    res.status(502).json({ error: resumoResult.error });
+    return;
+  }
+
+  /* Montar resposta combinada */
+  const resumo = resumoResult.data?.resultado || {};
+  const historico = historicoResult.ok ? (historicoResult.data?.resultado || {}) : {};
+  const empenho = empenhoResult.ok ? (empenhoResult.data?.resultado || {}) : {};
+
+  const resultado = {
+    contrato: resumo.contrato || numero_contrato,
+    empresa: historico.empresa || '',
+    fiscalizadora,
+    valor_total: resumo.valor_total || 0,
+    valor_servicos: resumo.valor_servicos || 0,
+    confere: resumo.confere,
+    itens: resumo.itens || [],
+    /* Dados do histórico */
+    total_medicoes: historico.quantidade || 0,
+    medicoes: historico.medicoes || [],
+    /* Dados de empenho */
+    empenho: {
+      total: empenho.total_empenho || 0,
+      valor_empenho: empenho.componentes?.valor_empenho || 0,
+      valor_ajustes: empenho.componentes?.valor_ajustes || 0,
+      valor_consumido: empenho.componentes?.valor_consumido || 0,
+      saldo: empenho.componentes?.saldo || 0,
+    },
+  };
+
+  console.log(`[SIAC] Contrato ${numero_contrato}: empresa="${resultado.empresa}", ${resultado.itens.length} itens, ${resultado.total_medicoes} medições, empenho=${resultado.empenho.total}.`);
+  res.json({ ok: true, resultado });
+});
+
+/* ══════════════════════════════════════════
    POST /api/siac/medicao — lista medições ou detalhe
    ══════════════════════════════════════════ */
 siacRouter.post('/medicao', async (req: Request, res: Response) => {
@@ -208,4 +268,52 @@ siacRouter.post('/historico', async (req: Request, res: Response) => {
   }
 
   res.json(result.data);
+});
+
+/* ══════════════════════════════════════════
+   POST /api/siac/ficha-contratual
+   Busca a ficha contratual diretamente do SISDNIT (scraping)
+   O SIGO não oferece esse recurso, então logamos no SISDNIT
+   com o CPF/senha do próprio usuário e parseamos o HTML.
+   ══════════════════════════════════════════ */
+siacRouter.post('/ficha-contratual', async (req: Request, res: Response) => {
+  const { numero_contrato, cpf, senha } = req.body;
+
+  if (!numero_contrato || !cpf || !senha) {
+    res.status(400).json({ error: 'Campos obrigatórios: numero_contrato, cpf, senha.' });
+    return;
+  }
+
+  console.log(`[SISDNIT] Buscando ficha contratual do contrato ${numero_contrato}...`);
+
+  /* 1. Login no SISDNIT */
+  const loginResult = await loginSisdnit(cpf, senha);
+  if (!loginResult.ok || !loginResult.session) {
+    console.log(`[SISDNIT] Login falhou: ${loginResult.error}`);
+    res.status(401).json({ error: loginResult.error });
+    return;
+  }
+  console.log(`[SISDNIT] Login OK — JSESSIONID=${loginResult.session.jsessionid.substring(0, 8)}...`);
+
+  /* 2. Buscar a ficha contratual */
+  const fichaResult = await buscarFichaContratual(loginResult.session, numero_contrato);
+  if (!fichaResult.ok || !fichaResult.data) {
+    console.log(`[SISDNIT] Ficha falhou: ${fichaResult.error}`);
+    res.status(502).json({ error: fichaResult.error });
+    return;
+  }
+
+  const ficha = fichaResult.data;
+  const camposPreenchidos = Object.entries(ficha)
+    .filter(([k, v]) => k !== 'campos_extras' && k !== 'aditivos' && v)
+    .length;
+
+  console.log(`[SISDNIT] Ficha contratual do contrato ${numero_contrato}: ${camposPreenchidos} campos preenchidos, ${ficha.aditivos.length} aditivos.`);
+
+  res.json({
+    ok: true,
+    resultado: ficha,
+    /* Para debug: primeiros 2000 chars do HTML original */
+    _debug_html: process.env.NODE_ENV !== 'production' ? fichaResult.html?.substring(0, 2000) : undefined,
+  });
 });
