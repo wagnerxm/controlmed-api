@@ -86,8 +86,16 @@ export interface ResumoContrato {
   valor_atual: string;
   situacao: string;
   data_assinatura: string;
-  /** Itens da planilha se disponíveis */
+  /** Grupos da planilha */
+  grupos: Array<{
+    numero: number;
+    descricao: string;
+    subtotal: string;
+  }>;
+  /** Itens da planilha */
   itens: Array<{
+    grupo: number;
+    grupo_descricao: string;
     numero: string;
     descricao: string;
     unidade: string;
@@ -554,6 +562,7 @@ export interface DadosContratoCompleto {
   data_inicio: string;
   data_fim: string;
   tipo_contrato: string;
+  grupos: ResumoContrato['grupos'];
   itens: ResumoContrato['itens'];
   aditivos: FichaContratual['aditivos'];
   campos_extras: Record<string, string>;
@@ -632,6 +641,7 @@ export async function buscarContratoCompleto(
     data_inicio: ficha?.data_inicio || '',
     data_fim: ficha?.data_fim || '',
     tipo_contrato: ficha?.tipo_contrato || '',
+    grupos: resumo?.grupos || [],
     itens: resumo?.itens || [],
     aditivos: ficha?.aditivos || [],
     campos_extras: { ...(resumo?.campos_extras || {}), ...(ficha?.campos_extras || {}) },
@@ -639,7 +649,7 @@ export async function buscarContratoCompleto(
 
   console.log(
     `[SISDNIT] Contrato ${numeroContrato}: empresa="${data.empresa}", rodovia="${data.rodovia}", ` +
-      `extensão="${data.extensao}", ${data.itens.length} itens, ${data.aditivos.length} aditivos.`,
+      `extensão="${data.extensao}", ${data.grupos.length} grupos, ${data.itens.length} itens.`,
   );
 
   return { ok: true, data };
@@ -852,10 +862,12 @@ function parsePDFFichaContratual(text: string): FichaContratual {
 /**
  * Parseia o texto extraído do PDF do Resumo do Contrato.
  *
- * O PDF header tem:
- *   "NN NNNNN/YYYY\nEMPRESA LTDA\nRESUMO DO CONTRATO\nContrato:\nEmpresa:"
- * Os valores (contrato, empresa) aparecem ANTES dos labels no header.
- * A planilha tem itens por lote, cada lote repete os mesmos códigos.
+ * Usa parser linha-a-linha (state machine) para lidar com:
+ *   - Grupos com nomes descritivos ("1 - CONSERVAÇÃO DA FAIXA...")
+ *   - Códigos de item com 4-8 dígitos (ex: 7200373)
+ *   - Descrições multi-linha com quebra de palavra
+ *   - Headers de página repetidos (ignorados)
+ *   - Subtotais por grupo
  */
 function parsePDFResumoContrato(text: string): ResumoContrato {
   const campos: Record<string, string> = {};
@@ -874,43 +886,217 @@ function parsePDFResumoContrato(text: string): ResumoContrato {
   );
   campos['unid_fiscalizacao'] = unidFiscMatch?.[1]?.trim() || '';
 
-  // Itens da planilha — organizado por LOTES
-  // Cada item aparece como: código\ndescrição\nvalor\nunidade\nSICRO\nqtde\npreço_unit\nNão
+  // ── Parser linha-a-linha ──
+  const grupos: ResumoContrato['grupos'] = [];
   const itens: ResumoContrato['itens'] = [];
 
-  // Dividir texto por lotes para preservar agrupamento
-  const loteRegex = /(\d+\s*-\s*LOTE\s+\d+)/g;
-  const lotes = text.split(loteRegex);
+  const lines = text.split('\n');
+  let grupoAtual = 0;
+  let grupoDescricao = '';
+  let inHeader = false; // dentro do header repetido do PDF
+  let itemCodigo = '';
+  let itemDescLines: string[] = [];
 
-  // Item regex para cada bloco
-  const itemRegex =
-    /(\d{5})\s*\n([A-ZÁÀÃÂÉÊÍÓÔÕÚÇ\s]+?)\s*\n([\d.,]+)\s*\n(\w+)\s*\n([\w-]+)\s*\n([\d.,]+)\s*\n([\d.,]+)\s*\n(?:Não|Sim)/g;
+  // Linhas a ignorar (header do PDF repetido em cada página)
+  const isHeaderLine = (line: string): boolean =>
+    /^Departamento Nacional/i.test(line) ||
+    /^Diretoria de Administração/i.test(line) ||
+    /^Coordenação-Geral/i.test(line) ||
+    /^RESUMO DO CONTRATO$/i.test(line) ||
+    /^Contrato:\s*$/.test(line) ||
+    /^Empresa:\s*$/.test(line) ||
+    /^Unidade Resp\./i.test(line) ||
+    /^PLANILHA DE SERVIÇOS$/i.test(line) ||
+    /^Versão dos Serviços/i.test(line) ||
+    /^ITEM DE PLANILHA$/i.test(line) ||
+    /^Descrição do Serviço$/i.test(line) ||
+    /^Unid\.\s*$/i.test(line) ||
+    /^Quantidade de$/i.test(line) ||
+    /^Projeto$/i.test(line) ||
+    /^Preço Unitário$/i.test(line) ||
+    /^Valor a PI$/i.test(line) ||
+    /^Índice de Reajust/i.test(line) ||
+    /^Código$/i.test(line) ||
+    /^SICRO$/i.test(line) ||
+    /^Item de$/i.test(line) ||
+    /^Serviço$/i.test(line) ||
+    /^Solicitado por /i.test(line) ||
+    /^Página \d+ de$/i.test(line) ||
+    /^\d{2}\s+\d{5}\/\d{4}$/.test(line) || // número do contrato no header
+    line === empresa; // nome da empresa no header
 
-  let loteAtual = '';
-  for (let i = 0; i < lotes.length; i++) {
-    const part = lotes[i];
-    const loteMatch = part.match(/(\d+)\s*-\s*LOTE\s+(\d+)/);
-    if (loteMatch) {
-      loteAtual = `LOTE ${loteMatch[2]}`;
+  // Detecta grupo: "N - DESCRIÇÃO DO GRUPO"
+  const isGrupoLine = (line: string): boolean =>
+    /^\d{1,3}\s*-\s*[A-ZÁÀÃÂÉÊÍÓÔÕÚÇ]/.test(line);
+
+  // Detecta código de item: 4-8 dígitos puros
+  const isCodigoItem = (line: string): boolean =>
+    /^\d{4,8}$/.test(line);
+
+  // Detecta valor monetário: "999.999,99" (tem vírgula obrigatória)
+  const isValorMonetario = (line: string): boolean =>
+    /^[\d.]+,\d{2,4}$/.test(line);
+
+  // Detecta unidade de medida: "M", "M²", "M³", "T", "UN", "UND", "CJ",
+  // "MES", "H", "KG", "T/KM", "UN/DI"
+  const isUnidade = (line: string): boolean =>
+    /^[A-Z²³][A-Z²³/]{0,5}$/.test(line);
+
+  // Detecta código SICRO: "CONSER", "PAVIM", "OAE-SA", "INCC", "CON-P", etc.
+  const isSicro = (line: string): boolean =>
+    /^[A-Z][A-Z0-9-]{1,10}$/.test(line);
+
+  // Detecta quantidade: "999,999" ou "999.999,999"
+  const isQuantidade = (line: string): boolean =>
+    /^[\d.]+,\d+$/.test(line);
+
+  // Estado do parser para cada item
+  type ItemState = 'idle' | 'desc' | 'val' | 'unit' | 'sicro' | 'qty' | 'price' | 'reajust';
+  let state: ItemState = 'idle';
+  let itemValor = '';
+  let itemUnidade = '';
+  let itemQtde = '';
+  let itemPreco = '';
+
+  function flushItem(): void {
+    if (itemCodigo && itemValor) {
+      itens.push({
+        grupo: grupoAtual,
+        grupo_descricao: grupoDescricao,
+        numero: itemCodigo,
+        descricao: itemDescLines.join(' ').replace(/\s+/g, ' ').trim(),
+        unidade: itemUnidade,
+        quantidade: itemQtde,
+        preco_unitario: itemPreco,
+        valor_total: itemValor,
+      });
+    }
+    itemCodigo = '';
+    itemDescLines = [];
+    itemValor = '';
+    itemUnidade = '';
+    itemQtde = '';
+    itemPreco = '';
+    state = 'idle';
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    // Ignorar headers repetidos do PDF
+    if (isHeaderLine(line)) {
+      if (state === 'desc') {
+        // Se estávamos coletando descrição e apareceu header, ignorar
+      }
       continue;
     }
 
-    let m;
-    while ((m = itemRegex.exec(part)) !== null) {
-      itens.push({
-        numero: m[1],
-        descricao: loteAtual ? `[${loteAtual}] ${m[2].trim()}` : m[2].trim(),
-        unidade: m[4],
-        quantidade: m[6],
-        preco_unitario: m[7],
-        valor_total: m[3],
-      });
+    // Ignorar linha de número de página solto (ex: "6")
+    if (/^\d{1,2}$/.test(line) && state === 'idle') continue;
+
+    // "Subtotal" marca fim do grupo
+    if (line === 'Subtotal') {
+      flushItem();
+      // Próximas 3 linhas são qtde, preço, valor do subtotal
+      // Não precisamos parsear, só registrar
+      continue;
     }
-    // Reset lastIndex for next lote
-    itemRegex.lastIndex = 0;
+
+    // "Total" marca fim de tudo
+    if (line === 'Total') {
+      flushItem();
+      continue;
+    }
+
+    // Grupo header
+    if (isGrupoLine(line) && state === 'idle') {
+      flushItem();
+      const gm = line.match(/^(\d{1,3})\s*-\s*(.+)/);
+      if (gm) {
+        grupoAtual = parseInt(gm[1]);
+        grupoDescricao = gm[2].trim();
+        grupos.push({ numero: grupoAtual, descricao: grupoDescricao, subtotal: '' });
+      }
+      continue;
+    }
+
+    // State machine
+    switch (state) {
+      case 'idle':
+        if (isCodigoItem(line)) {
+          flushItem();
+          itemCodigo = line;
+          state = 'desc';
+        }
+        break;
+
+      case 'desc':
+        // Coletando descrição até encontrar valor monetário
+        if (isValorMonetario(line)) {
+          itemValor = line;
+          state = 'unit';
+        } else if (isCodigoItem(line)) {
+          // Novo item sem valor (não deveria acontecer, mas proteger)
+          flushItem();
+          itemCodigo = line;
+          state = 'desc';
+        } else {
+          itemDescLines.push(line);
+        }
+        break;
+
+      case 'unit':
+        if (isUnidade(line)) {
+          itemUnidade = line;
+          state = 'sicro';
+        } else {
+          // Unidade não reconhecida — usar como está
+          itemUnidade = line;
+          state = 'sicro';
+        }
+        break;
+
+      case 'sicro':
+        // Código SICRO — pular, não precisamos
+        state = 'qty';
+        break;
+
+      case 'qty':
+        if (isQuantidade(line)) {
+          itemQtde = line;
+          state = 'price';
+        } else {
+          itemQtde = line;
+          state = 'price';
+        }
+        break;
+
+      case 'price':
+        itemPreco = line;
+        state = 'reajust';
+        break;
+
+      case 'reajust':
+        // "Não" ou "Sim" — item completo
+        flushItem();
+        break;
+    }
+  }
+  // Flush último item pendente
+  flushItem();
+
+  // Atualizar subtotais dos grupos
+  for (const grupo of grupos) {
+    const itensGrupo = itens.filter((i) => i.grupo === grupo.numero);
+    const subtotal = itensGrupo.reduce((acc, i) => {
+      const val = parseFloat(i.valor_total.replace(/\./g, '').replace(',', '.')) || 0;
+      return acc + val;
+    }, 0);
+    grupo.subtotal = subtotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 });
   }
 
-  // Total value — last big number on "Total" line
+  // Total value
   const totalMatch = text.match(/Total\s*\n[\s\S]*?([\d.,]{10,})\s*\n/);
   const valorContrato = totalMatch?.[1] || '';
 
@@ -927,6 +1113,7 @@ function parsePDFResumoContrato(text: string): ResumoContrato {
     valor_atual: valorContrato,
     situacao: '',
     data_assinatura: '',
+    grupos,
     itens,
     campos_extras: campos,
   };
@@ -1074,6 +1261,8 @@ function parseHTMLResumoContrato(html: string): ResumoContrato {
       const tds = $(row).find('td');
       if (tds.length >= 4) {
         itens.push({
+          grupo: 0,
+          grupo_descricao: '',
           numero: cleanText($(tds[0]).text()),
           descricao: cleanText($(tds[1]).text()),
           unidade: cleanText($(tds[2]).text()),
@@ -1097,6 +1286,7 @@ function parseHTMLResumoContrato(html: string): ResumoContrato {
     valor_atual: findField(campos, ['valor_atual', 'valor_atualizado']) || '',
     situacao: findField(campos, ['situacao', 'status']) || '',
     data_assinatura: findField(campos, ['data_assinatura', 'assinatura']) || '',
+    grupos: [],
     itens,
     campos_extras: campos,
   };
