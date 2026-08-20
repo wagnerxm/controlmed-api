@@ -166,6 +166,7 @@ function readShp(buf: Buffer): (number[][] | null)[] {
 interface RodoviaBase {
   br: string;
   uf: string;
+  tipo_tr: string;
   fonte: string;
   km_min: number;
   km_max: number;
@@ -195,14 +196,16 @@ function processShpDbf(shpBuf: Buffer, dbfBuf: Buffer, versaoLabel: string): Rod
     return [];
   }
 
-  // Agrupar segmentos por BR/UF
+  // Tipos de trecho válidos no SNV
+  const TIPOS_VALIDOS = new Set(['B', 'A', 'N', 'C', 'U', 'V']);
+
+  // Agrupar segmentos por BR/tipo/UF
   const roadMap: Record<string, Array<{ ki: number; kf: number; pts: number[][] }>> = {};
-  let skipped = 0;
 
   for (let i = 0; i < recs.length; i++) {
     const r = recs[i];
-    // Se existe campo de tipo, filtrar por 'B' (federal)
-    if (fieldMap.tipo && r[fieldMap.tipo] !== 'B') { skipped++; continue; }
+    const tipo = fieldMap.tipo ? String(r[fieldMap.tipo] || 'B').toUpperCase() : 'B';
+    if (!TIPOS_VALIDOS.has(tipo)) continue;
     const ki = r[fieldMap.ki] as number | null;
     const kf = r[fieldMap.kf] as number | null;
     if (ki == null || kf == null) continue;
@@ -212,14 +215,14 @@ function processShpDbf(shpBuf: Buffer, dbfBuf: Buffer, versaoLabel: string): Rod
     const br = brRaw.padStart(3, '0');
     const uf = String(r[fieldMap.uf] || '').trim().toUpperCase();
     if (!uf || uf.length !== 2 || !br || br === '000') continue;
-    const key = `${br}-${uf}`;
+    const key = `${br}-${tipo}-${uf}`;
     (roadMap[key] = roadMap[key] || []).push({ ki, kf, pts });
   }
 
-  // Converter cada BR/UF em RodoviaBase
+  // Converter cada BR/tipo/UF em RodoviaBase
   const rodovias: RodoviaBase[] = [];
   for (const key of Object.keys(roadMap).sort()) {
-    const [br, uf] = key.split('-');
+    const [br, tipo, uf] = key.split('-');
     const segs = roadMap[key].sort((a, b) => a.ki - b.ki);
 
     const lat: number[] = [], lon: number[] = [], km: number[] = [];
@@ -246,7 +249,7 @@ function processShpDbf(shpBuf: Buffer, dbfBuf: Buffer, versaoLabel: string): Rod
     if (!lat.length) continue;
 
     rodovias.push({
-      br, uf,
+      br, uf, tipo_tr: tipo,
       fonte: `SNV ${versaoLabel}`,
       km_min: km[0],
       km_max: km[km.length - 1],

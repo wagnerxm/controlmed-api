@@ -64,10 +64,29 @@ app.use((_req, res) => {
   res.status(404).json({ error: 'Endpoint não encontrado.' });
 });
 
+/* ── Auto-migrações (idempotentes) ── */
+async function runMigrations() {
+  const { pool: p } = await import('./db.js');
+  // 003: coluna tipo_tr na tabela rodovias
+  const col = await p.query(`
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'rodovias' AND column_name = 'tipo_tr'
+  `);
+  if (!col.rowCount) {
+    console.log('🔧 Migração 003: adicionando coluna tipo_tr...');
+    await p.query(`ALTER TABLE rodovias ADD COLUMN tipo_tr CHAR(1) NOT NULL DEFAULT 'B'`);
+    await p.query(`DROP INDEX IF EXISTS idx_rodovias_br_uf_snv`);
+    await p.query(`CREATE UNIQUE INDEX idx_rodovias_br_uf_tipo_snv ON rodovias(br, uf, tipo_tr, versao_snv)`);
+    await p.query(`CREATE INDEX IF NOT EXISTS idx_rodovias_tipo ON rodovias(tipo_tr)`);
+    console.log('✅ Migração 003 concluída');
+  }
+}
+
 /* ── Boot ── */
 async function start() {
   try {
     await testConnection();
+    await runMigrations();
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`
 ╔══════════════════════════════════════════╗

@@ -35,20 +35,23 @@ rodoviasRouter.get('/versoes', async (_req: Request, res: Response) => {
 rodoviasRouter.get('/', async (req: Request, res: Response) => {
   try {
     const snv = (req.query.snv as string) || '';
+    const tipo = ((req.query.tipo as string) || '').toUpperCase() || null;
     let sql: string;
     let params: any[];
 
-    if (snv) {
-      // Rodovias de uma versão específica
-      sql = `SELECT id, br, uf, km_min, km_max, fonte, versao_snv, data_atualizacao
+    if (snv && tipo) {
+      sql = `SELECT id, br, uf, tipo_tr, km_min, km_max, fonte, versao_snv, data_atualizacao
+             FROM rodovias WHERE versao_snv = $1 AND tipo_tr = $2 ORDER BY br, uf`;
+      params = [snv.toLowerCase(), tipo];
+    } else if (snv) {
+      sql = `SELECT id, br, uf, tipo_tr, km_min, km_max, fonte, versao_snv, data_atualizacao
              FROM rodovias WHERE versao_snv = $1 ORDER BY br, uf`;
       params = [snv.toLowerCase()];
     } else {
-      // Retorna a versão mais recente de cada rodovia
-      sql = `SELECT DISTINCT ON (br, uf)
-               id, br, uf, km_min, km_max, fonte, versao_snv, data_atualizacao
+      sql = `SELECT DISTINCT ON (br, uf, tipo_tr)
+               id, br, uf, tipo_tr, km_min, km_max, fonte, versao_snv, data_atualizacao
              FROM rodovias
-             ORDER BY br, uf, versao_snv DESC`;
+             ORDER BY br, uf, tipo_tr, versao_snv DESC`;
       params = [];
     }
     const rows = await query(sql, params);
@@ -63,19 +66,24 @@ rodoviasRouter.get('/:br', async (req: Request, res: Response) => {
   try {
     const br = (req.params.br as string).replace(/\D/g, '').padStart(3, '0');
     const snv = (req.query.snv as string) || '';
+    const tipo = ((req.query.tipo as string) || '').toUpperCase() || null;
 
     let sql: string;
     let params: any[];
 
-    if (snv) {
-      sql = `SELECT id, br, uf, km_min, km_max, fonte, versao_snv
+    if (snv && tipo) {
+      sql = `SELECT id, br, uf, tipo_tr, km_min, km_max, fonte, versao_snv
+             FROM rodovias WHERE br = $1 AND versao_snv = $2 AND tipo_tr = $3 ORDER BY uf`;
+      params = [br, snv.toLowerCase(), tipo];
+    } else if (snv) {
+      sql = `SELECT id, br, uf, tipo_tr, km_min, km_max, fonte, versao_snv
              FROM rodovias WHERE br = $1 AND versao_snv = $2 ORDER BY uf`;
       params = [br, snv.toLowerCase()];
     } else {
-      sql = `SELECT DISTINCT ON (uf)
-               id, br, uf, km_min, km_max, fonte, versao_snv
+      sql = `SELECT DISTINCT ON (uf, tipo_tr)
+               id, br, uf, tipo_tr, km_min, km_max, fonte, versao_snv
              FROM rodovias WHERE br = $1
-             ORDER BY uf, versao_snv DESC`;
+             ORDER BY uf, tipo_tr, versao_snv DESC`;
       params = [br];
     }
     const rows = await query(sql, params);
@@ -112,22 +120,22 @@ rodoviasRouter.get('/:br/:uf', async (req: Request, res: Response) => {
     const br = (req.params.br as string).replace(/\D/g, '').padStart(3, '0');
     const uf = (req.params.uf as string).toUpperCase();
     const snv = (req.query.snv as string) || '';
+    const tipo = ((req.query.tipo as string) || 'B').toUpperCase(); // default B para retrocompat
 
     let sql: string;
     let params: any[];
 
     if (snv) {
-      sql = `SELECT * FROM rodovias WHERE br = $1 AND uf = $2 AND versao_snv = $3 LIMIT 1`;
-      params = [br, uf, snv.toLowerCase()];
+      sql = `SELECT * FROM rodovias WHERE br = $1 AND uf = $2 AND versao_snv = $3 AND tipo_tr = $4 LIMIT 1`;
+      params = [br, uf, snv.toLowerCase(), tipo];
     } else {
-      // Pega a versão mais recente
-      sql = `SELECT * FROM rodovias WHERE br = $1 AND uf = $2
+      sql = `SELECT * FROM rodovias WHERE br = $1 AND uf = $2 AND tipo_tr = $3
              ORDER BY versao_snv DESC LIMIT 1`;
-      params = [br, uf];
+      params = [br, uf, tipo];
     }
     const row = await queryOne(sql, params);
     if (!row) {
-      res.status(404).json({ error: `Rodovia BR-${br}/${uf}${snv ? ' (SNV ' + snv + ')' : ''} não encontrada.` });
+      res.status(404).json({ error: `Rodovia BR-${br}/${uf} (tipo ${tipo})${snv ? ' SNV ' + snv : ''} não encontrada.` });
       return;
     }
     res.json(row);
@@ -178,7 +186,7 @@ rodoviasRouter.post('/import', async (req: Request, res: Response) => {
     const { rodovias, versao_snv } = req.body as {
       versao_snv: string;
       rodovias: Array<{
-        br: string; uf: string; fonte?: string;
+        br: string; uf: string; tipo_tr?: string; fonte?: string;
         km_min: number; km_max: number;
         lat: number[]; lon: number[]; km: number[];
       }>;
@@ -193,15 +201,17 @@ rodoviasRouter.post('/import', async (req: Request, res: Response) => {
       await client.query('BEGIN');
       for (const rod of rodovias) {
         const snv = versao_snv.toLowerCase();
-        const id = `rod-${rod.br}-${rod.uf}-${snv}`;
+        const tipo = (rod.tipo_tr || 'B').toUpperCase();
+        const id = `rod-${rod.br}-${tipo}-${rod.uf}-${snv}`;
         await client.query(`
-          INSERT INTO rodovias (id, br, uf, fonte, km_min, km_max, lat, lon, km, versao_snv, data_atualizacao)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+          INSERT INTO rodovias (id, br, uf, tipo_tr, fonte, km_min, km_max, lat, lon, km, versao_snv, data_atualizacao)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
           ON CONFLICT (id) DO UPDATE SET
             km_min=EXCLUDED.km_min, km_max=EXCLUDED.km_max,
             lat=EXCLUDED.lat, lon=EXCLUDED.lon, km=EXCLUDED.km,
-            data_atualizacao=EXCLUDED.data_atualizacao, fonte=EXCLUDED.fonte
-        `, [id, rod.br, rod.uf, rod.fonte || 'SNV/DNIT', rod.km_min, rod.km_max,
+            data_atualizacao=EXCLUDED.data_atualizacao, fonte=EXCLUDED.fonte,
+            tipo_tr=EXCLUDED.tipo_tr
+        `, [id, rod.br, rod.uf, tipo, rod.fonte || 'SNV/DNIT', rod.km_min, rod.km_max,
             rod.lat, rod.lon, rod.km, snv]);
         inseridas++;
       }
