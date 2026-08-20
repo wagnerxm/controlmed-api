@@ -357,3 +357,28 @@ siacRouter.post('/ficha-contratual', async (req: Request, res: Response) => {
     _debug_html: process.env.NODE_ENV !== 'production' ? fichaResult.html?.substring(0, 2000) : undefined,
   });
 });
+
+/* ══════════════════════════════════════════
+   POST /api/siac/explore — descobre URLs do SISDNIT (temporário)
+   ══════════════════════════════════════════ */
+import { exploreSisdnit } from '../lib/sisdnit-explorer.js';
+
+siacRouter.post('/explore', async (req: Request, res: Response) => {
+  const { cpf, senha } = getSiacCredentials(req.body);
+
+  if (!cpf || !senha) {
+    res.status(400).json({ error: 'Credenciais SIAC necessárias.' });
+    return;
+  }
+
+  console.log('[EXPLORER] Iniciando exploração do SISDNIT...');
+  const result = await exploreSisdnit(cpf, senha);
+
+  if (!result.ok) {
+    res.status(502).json({ error: result.error });
+    return;
+  }
+
+  console.log(`[EXPLORER] Exploração concluída: ${result.siacPages?.length || 0} páginas encontradas.`);
+  res.json(result);
+});
