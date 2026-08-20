@@ -373,6 +373,9 @@ async function main() {
     const startVer = Date.now();
 
     try {
+      // Garantir que dir temp existe antes de cada download
+      mkdirSync(TMP, { recursive: true });
+
       // Baixar ZIP
       const zipPath = join(TMP, filename);
       console.log(`  📥 Baixando ${filename}...`);
