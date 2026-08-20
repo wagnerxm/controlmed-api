@@ -205,7 +205,8 @@ async function main() {
 
   // 1. Encontrar layer
   const layer = await findWfsLayer();
-  const versao = layer.replace('DNIT:', '').toLowerCase();
+  // Versão no formato DNIT (ex: "202507a"), sem prefixo "snv_"
+  const versao = layer.replace('DNIT:', '').replace(/^snv_/i, '').toLowerCase();
 
   // 2. Listar rodovias
   let roads = await listAllRoads(layer);
