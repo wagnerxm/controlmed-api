@@ -129,7 +129,11 @@ function readDbf(buf: Buffer): DbfRecord[] {
   return recs;
 }
 
-/* ── Parser SHP puro (polyline type 3 e 5) ── */
+/* ── Parser SHP puro ── */
+// Tipos: 3=PolyLine, 5=Polygon, 13=PolyLineZ, 15=PolygonZ, 23=PolyLineM, 25=PolygonM
+// Todos usam o mesmo layout X,Y nos pontos; Z e M vêm depois e são ignorados.
+const POLY_TYPES = new Set([3, 5, 13, 15, 23, 25]);
+
 function readShp(buf: Buffer): (number[][] | null)[] {
   const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const feats: (number[][] | null)[] = [];
@@ -138,7 +142,7 @@ function readShp(buf: Buffer): (number[][] | null)[] {
     const contentLen = v.getInt32(off + 4, false);
     const recStart = off + 8;
     const type = v.getInt32(recStart, true);
-    if (type === 3 || type === 5) { // PolyLine or Polygon
+    if (POLY_TYPES.has(type)) {
       const numParts = v.getInt32(recStart + 36, true);
       const numPoints = v.getInt32(recStart + 40, true);
       const ptsOff = recStart + 44 + numParts * 4;
@@ -174,21 +178,40 @@ function processShpDbf(shpBuf: Buffer, dbfBuf: Buffer, versaoLabel: string): Rod
   const recs = readDbf(dbfBuf);
   const geoms = readShp(shpBuf);
 
+  // Detectar formato de campos (varia entre versões do SNV)
+  // Formato novo (2016+): vl_br, sg_uf, sg_tipo_tr, vl_km_inic, vl_km_fina
+  // Formato antigo (2013-2015): BR, UF, km_inicial, km_final (sem sg_tipo_tr)
+  const sample = recs[0] || {};
+  const fieldMap = {
+    br:   'vl_br'      in sample ? 'vl_br'      : 'br'   in sample ? 'br'   : 'BR'   in sample ? 'BR'   : null,
+    uf:   'sg_uf'      in sample ? 'sg_uf'      : 'uf'   in sample ? 'uf'   : 'UF'   in sample ? 'UF'   : null,
+    tipo: 'sg_tipo_tr' in sample ? 'sg_tipo_tr' : null,
+    ki:   'vl_km_inic' in sample ? 'vl_km_inic' : 'km_inicial' in sample ? 'km_inicial' : null,
+    kf:   'vl_km_fina' in sample ? 'vl_km_fina' : 'km_final'   in sample ? 'km_final'   : null,
+  };
+
+  if (!fieldMap.br || !fieldMap.uf || !fieldMap.ki || !fieldMap.kf) {
+    console.log(`     ⚠ Campos não reconhecidos. Disponíveis: ${Object.keys(sample).join(', ')}`);
+    return [];
+  }
+
   // Agrupar segmentos por BR/UF
   const roadMap: Record<string, Array<{ ki: number; kf: number; pts: number[][] }>> = {};
   let skipped = 0;
 
   for (let i = 0; i < recs.length; i++) {
     const r = recs[i];
-    if (r.sg_tipo_tr !== 'B') { skipped++; continue; }
-    const ki = r.vl_km_inic as number | null;
-    const kf = r.vl_km_fina as number | null;
+    // Se existe campo de tipo, filtrar por 'B' (federal)
+    if (fieldMap.tipo && r[fieldMap.tipo] !== 'B') { skipped++; continue; }
+    const ki = r[fieldMap.ki] as number | null;
+    const kf = r[fieldMap.kf] as number | null;
     if (ki == null || kf == null) continue;
     const pts = geoms[i];
     if (!pts || pts.length < 2) continue;
-    const br = String(r.vl_br).padStart(3, '0');
-    const uf = r.sg_uf as string;
-    if (!uf || uf.length !== 2) continue;
+    const brRaw = String(r[fieldMap.br] || '').replace(/\D/g, '');
+    const br = brRaw.padStart(3, '0');
+    const uf = String(r[fieldMap.uf] || '').trim().toUpperCase();
+    if (!uf || uf.length !== 2 || !br || br === '000') continue;
     const key = `${br}-${uf}`;
     (roadMap[key] = roadMap[key] || []).push({ ki, kf, pts });
   }
