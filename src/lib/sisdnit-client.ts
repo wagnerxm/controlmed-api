@@ -381,12 +381,12 @@ export async function buscarContratoPorNumero(
     return { ok: false, error: listRes.error || 'Nenhum contrato encontrado.' };
   }
 
-  // Normalizar o número para busca
+  // Normalizar o número para busca — comparar número/ano exatamente
   const numNorm = normalizeContractNumber(numeroContrato);
 
   const found = listRes.data.find((c) => {
     const cNorm = normalizeContractNumber(c.numero);
-    return cNorm === numNorm || cNorm.includes(numNorm) || numNorm.includes(cNorm);
+    return cNorm === numNorm;
   });
 
   if (!found) {
@@ -1143,8 +1143,20 @@ function findField(campos: Record<string, string>, keys: string[]): string | und
   return undefined;
 }
 
+/**
+ * Normaliza número de contrato para comparação.
+ * Extrai "número/ano" removendo zeros à esquerda do número.
+ * Ex: "00 00515/2024" → "515/2024", "00015/2024" → "15/2024"
+ */
 function normalizeContractNumber(num: string): string {
-  return num.replace(/\D/g, '').replace(/^0+/, '');
+  // Extrair padrão NNNNN/YYYY
+  const m = num.match(/(\d+)\s*\/\s*(\d{4})/);
+  if (m) {
+    const n = m[1].replace(/^0+/, '') || '0';
+    return `${n}/${m[2]}`;
+  }
+  // Fallback: remover prefixo "NN " e zeros
+  return num.replace(/^\d{2}\s+/, '').replace(/^0+/, '').trim();
 }
 
 function parseContratoDescricao(desc: string): { numero: string; empresa: string } {
