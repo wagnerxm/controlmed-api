@@ -41,6 +41,9 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
       IMPORT_KEY: ${IMPORT_KEY:-controlcheck-snv-import-2026}
       SIGO_API_KEY: ${SIGO_API_KEY:-}
+      SIAC_CPF: ${SIAC_CPF:-}
+      SIAC_SENHA: ${SIAC_SENHA:-}
+      SIAC_FISCALIZADORA: ${SIAC_FISCALIZADORA:-RN}
     volumes:
       - uploads:/app/uploads
     ports:

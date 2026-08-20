@@ -18,6 +18,16 @@ export const siacRouter = Router();
 
 const SIGO_BASE = 'https://sigo.eng.br/api/siac/v1';
 
+/* ── Credenciais SIAC padrão (do .env) ── */
+/** Se o front não mandar cpf/senha, usa as do .env */
+function getSiacCredentials(body: { cpf?: string; senha?: string; fiscalizadora?: string }) {
+  return {
+    cpf: body.cpf || process.env.SIAC_CPF || '',
+    senha: body.senha || process.env.SIAC_SENHA || '',
+    fiscalizadora: body.fiscalizadora || process.env.SIAC_FISCALIZADORA || 'RN',
+  };
+}
+
 /* ── Consulta genérica ao SIGO (assíncrona: cria + poll) ── */
 async function consultarSigo(body: {
   tipo: string;
@@ -100,10 +110,15 @@ async function consultarSigo(body: {
    POST /api/siac/consultar — consulta genérica
    ══════════════════════════════════════════ */
 siacRouter.post('/consultar', async (req: Request, res: Response) => {
-  const { tipo, numero_contrato, fiscalizadora, cpf, senha, numero_medicao, formato } = req.body;
+  const { tipo, numero_contrato, numero_medicao, formato } = req.body;
+  const { cpf, senha, fiscalizadora } = getSiacCredentials(req.body);
 
-  if (!tipo || !numero_contrato || !fiscalizadora || !cpf || !senha) {
-    res.status(400).json({ error: 'Campos obrigatórios: tipo, numero_contrato, fiscalizadora, cpf, senha.' });
+  if (!tipo || !numero_contrato) {
+    res.status(400).json({ error: 'Campos obrigatórios: tipo, numero_contrato.' });
+    return;
+  }
+  if (!cpf || !senha) {
+    res.status(400).json({ error: 'Credenciais SIAC não informadas e não configuradas no servidor (SIAC_CPF / SIAC_SENHA).' });
     return;
   }
 
@@ -126,10 +141,15 @@ siacRouter.post('/consultar', async (req: Request, res: Response) => {
    Atalho para tipo=resumo-contrato, formato=json
    ══════════════════════════════════════════ */
 siacRouter.post('/resumo', async (req: Request, res: Response) => {
-  const { numero_contrato, fiscalizadora, cpf, senha } = req.body;
+  const { numero_contrato } = req.body;
+  const { cpf, senha, fiscalizadora } = getSiacCredentials(req.body);
 
-  if (!numero_contrato || !fiscalizadora || !cpf || !senha) {
-    res.status(400).json({ error: 'Campos obrigatórios: numero_contrato, fiscalizadora, cpf, senha.' });
+  if (!numero_contrato) {
+    res.status(400).json({ error: 'Campo obrigatório: numero_contrato.' });
+    return;
+  }
+  if (!cpf || !senha) {
+    res.status(400).json({ error: 'Credenciais SIAC não informadas e não configuradas no servidor.' });
     return;
   }
 
@@ -159,10 +179,15 @@ siacRouter.post('/resumo', async (req: Request, res: Response) => {
    Busca resumo + histórico em paralelo e retorna dados completos do contrato
    ══════════════════════════════════════════ */
 siacRouter.post('/contrato-completo', async (req: Request, res: Response) => {
-  const { numero_contrato, fiscalizadora, cpf, senha } = req.body;
+  const { numero_contrato } = req.body;
+  const { cpf, senha, fiscalizadora } = getSiacCredentials(req.body);
 
-  if (!numero_contrato || !fiscalizadora || !cpf || !senha) {
-    res.status(400).json({ error: 'Campos obrigatórios: numero_contrato, fiscalizadora, cpf, senha.' });
+  if (!numero_contrato) {
+    res.status(400).json({ error: 'Campo obrigatório: numero_contrato.' });
+    return;
+  }
+  if (!cpf || !senha) {
+    res.status(400).json({ error: 'Credenciais SIAC não informadas e não configuradas no servidor.' });
     return;
   }
 
@@ -215,10 +240,15 @@ siacRouter.post('/contrato-completo', async (req: Request, res: Response) => {
    POST /api/siac/medicao — lista medições ou detalhe
    ══════════════════════════════════════════ */
 siacRouter.post('/medicao', async (req: Request, res: Response) => {
-  const { numero_contrato, fiscalizadora, cpf, senha, numero_medicao, formato } = req.body;
+  const { numero_contrato, numero_medicao, formato } = req.body;
+  const { cpf, senha, fiscalizadora } = getSiacCredentials(req.body);
 
-  if (!numero_contrato || !fiscalizadora || !cpf || !senha) {
-    res.status(400).json({ error: 'Campos obrigatórios: numero_contrato, fiscalizadora, cpf, senha.' });
+  if (!numero_contrato) {
+    res.status(400).json({ error: 'Campo obrigatório: numero_contrato.' });
+    return;
+  }
+  if (!cpf || !senha) {
+    res.status(400).json({ error: 'Credenciais SIAC não informadas e não configuradas no servidor.' });
     return;
   }
 
@@ -246,10 +276,15 @@ siacRouter.post('/medicao', async (req: Request, res: Response) => {
    POST /api/siac/historico — histórico de medições
    ══════════════════════════════════════════ */
 siacRouter.post('/historico', async (req: Request, res: Response) => {
-  const { numero_contrato, fiscalizadora, cpf, senha, formato } = req.body;
+  const { numero_contrato, formato } = req.body;
+  const { cpf, senha, fiscalizadora } = getSiacCredentials(req.body);
 
-  if (!numero_contrato || !fiscalizadora || !cpf || !senha) {
-    res.status(400).json({ error: 'Campos obrigatórios: numero_contrato, fiscalizadora, cpf, senha.' });
+  if (!numero_contrato) {
+    res.status(400).json({ error: 'Campo obrigatório: numero_contrato.' });
+    return;
+  }
+  if (!cpf || !senha) {
+    res.status(400).json({ error: 'Credenciais SIAC não informadas e não configuradas no servidor.' });
     return;
   }
 
@@ -277,10 +312,15 @@ siacRouter.post('/historico', async (req: Request, res: Response) => {
    com o CPF/senha do próprio usuário e parseamos o HTML.
    ══════════════════════════════════════════ */
 siacRouter.post('/ficha-contratual', async (req: Request, res: Response) => {
-  const { numero_contrato, cpf, senha } = req.body;
+  const { numero_contrato } = req.body;
+  const { cpf, senha } = getSiacCredentials(req.body);
 
-  if (!numero_contrato || !cpf || !senha) {
-    res.status(400).json({ error: 'Campos obrigatórios: numero_contrato, cpf, senha.' });
+  if (!numero_contrato) {
+    res.status(400).json({ error: 'Campo obrigatório: numero_contrato.' });
+    return;
+  }
+  if (!cpf || !senha) {
+    res.status(400).json({ error: 'Credenciais SIAC não informadas e não configuradas no servidor (SIAC_CPF / SIAC_SENHA).' });
     return;
   }
 
