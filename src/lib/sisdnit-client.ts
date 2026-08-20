@@ -3,16 +3,21 @@
  *
  * Substitui a dependência do SIGO para consultas ao SIAC.
  * Usa o endpoint JSON-RPC para dados estruturados e
- * form submission para relatórios HTML (ficha contratual, resumo).
+ * form submission + PDF parsing para relatórios (ficha contratual, resumo).
  *
  * Fluxo:
  *   1. POST login com senha MD5 → captura JSESSIONID
  *   2. Navega até SIAC e Contratos (registra objetos JSON-RPC)
- *   3. Chama métodos JSON-RPC ou submete formulários
+ *   3. Chama métodos JSON-RPC ou submete formulários → parseia PDF
  */
 
 import * as cheerio from 'cheerio';
 import { createHash } from 'crypto';
+import { createRequire } from 'module';
+
+// pdf-parse v1 is CommonJS — use createRequire for ESM compatibility
+const require = createRequire(import.meta.url);
+const pdf: (buffer: Buffer) => Promise<{ text: string; numpages: number }> = require('pdf-parse');
 
 const SISDNIT_BASE = 'https://sisdnit.dnit.gov.br/sisdnit';
 const JSONRPC_URL = `${SISDNIT_BASE}/JSON-RPC`;
@@ -438,19 +443,27 @@ export async function buscarFichaContratual(
 
   const contentType = res.headers.get('content-type') || '';
 
-  // Se retornou PDF, precisamos parsear diferente
+  // O relatório retorna PDF — parsear o texto do PDF
   if (contentType.includes('application/pdf')) {
-    return { ok: false, error: 'Ficha retornou em PDF. Parsing de PDF não implementado.' };
+    const buffer = Buffer.from(await res.arrayBuffer());
+    console.log(`[SISDNIT] Ficha contratual PDF: ${buffer.length} bytes`);
+    try {
+      const pdfData = await pdf(buffer);
+      const data = parsePDFFichaContratual(pdfData.text);
+      return { ok: true, data };
+    } catch (err: any) {
+      return { ok: false, error: `Falha ao parsear PDF da ficha: ${err.message}` };
+    }
   }
 
   const html = await res.text();
 
   if (html.length < 200 || html.includes('LoginForm')) {
-    // Sessão expirou
     cachedSession = null;
     return { ok: false, error: 'Sessão expirou. Tente novamente.' };
   }
 
+  // Fallback: tentar parsear como HTML
   const data = parseHTMLFichaContratual(html);
   return { ok: true, data, html: html.substring(0, 5000) };
 }
@@ -497,7 +510,15 @@ export async function buscarResumoContrato(
 
   const contentType = res.headers.get('content-type') || '';
   if (contentType.includes('application/pdf')) {
-    return { ok: false, error: 'Resumo retornou em PDF. Parsing de PDF não implementado.' };
+    const buffer = Buffer.from(await res.arrayBuffer());
+    console.log(`[SISDNIT] Resumo contrato PDF: ${buffer.length} bytes`);
+    try {
+      const pdfData = await pdf(buffer);
+      const data = parsePDFResumoContrato(pdfData.text);
+      return { ok: true, data };
+    } catch (err: any) {
+      return { ok: false, error: `Falha ao parsear PDF do resumo: ${err.message}` };
+    }
   }
 
   const html = await res.text();
@@ -622,6 +643,293 @@ export async function buscarContratoCompleto(
   );
 
   return { ok: true, data };
+}
+
+/* ══════════════════════════════════════════
+   PDF Parsers — ficha contratual e resumo
+   ══════════════════════════════════════════ */
+
+/**
+ * Parseia o texto extraído do PDF da Ficha Contratual.
+ *
+ * O PDF tem layout tabular com múltiplas colunas — a extração de texto
+ * lineariza colunas de forma imprevisível. Usamos regexes resilientes
+ * e fallbacks para cada campo.
+ */
+function parsePDFFichaContratual(text: string): FichaContratual {
+  const campos: Record<string, string> = {};
+
+  // Empresa Executora — "CNPJ - NOME"
+  const empresaMatch = text.match(
+    /Empresa\s+Executora\s*([\d./-]+)\s*-\s*(.+?)(?:\n|Nº do Convênio)/s,
+  );
+  const cnpj = empresaMatch?.[1]?.trim() || '';
+  const empresa = empresaMatch?.[2]?.trim() || '';
+
+  // Contrato — "NN NNNNN/YYYY" → normalizar para "NNNNN/YYYY"
+  const contratoMatch = text.match(/\b\d{2}\s+(\d{5}\/\d{4})\b/);
+  const contrato = contratoMatch?.[1] || '';
+
+  // Situação — buscar "ATIVO EM dd/mm/yyyy" ou padrão similar primeiro
+  const situacaoAtivo = text.match(/(ATIVO\s+EM\s+\d{2}\/\d{2}\/\d{4})/);
+  const situacaoEncerrado = text.match(/(ENCERRADO|PARALISADO|RESCINDIDO|SUSPENSO)/i);
+  const situacao = situacaoAtivo?.[1] || situacaoEncerrado?.[1] || '';
+
+  // Tipo do Contrato — buscar "OBRA DE ENGENHARIA", "SERVIÇO", etc. que aparece antes de "ATIVO/LIBERADO"
+  const tipoMatch = text.match(/(OBRA\s+DE\s+ENGENHARIA|SERVIÇO|OBRA|CONSULTORIA)/i);
+  const tipoContrato = tipoMatch?.[1]?.trim() || '';
+
+  // Objeto do Contrato — texto entre "Objeto do Contrato" e "UNIDADES RESPONSÁVEIS"
+  const objetoMatch = text.match(
+    /Objeto\s+do\s+Contrato\s*\n([\s\S]*?)(?:UNIDADES\s+RESPONS)/i,
+  );
+  const objeto = objetoMatch?.[1]?.replace(/\s+/g, ' ').trim() || '';
+
+  // Fiscal — nome de pessoa (MAIÚSCULAS com acentos, 2+ palavras)
+  // Aparece após o label "Fiscal" na seção UNIDADES RESPONSÁVEIS
+  // O label "Fiscal" vem antes de nomes de unidades (SEDE, COORDENAÇÃO...)
+  // e o nome do fiscal vem depois — é o nome de pessoa (não cargo/unidade)
+  const fiscalSection = text.match(
+    /Fiscal\s*\n([\s\S]*?)(?:LOCALIZAÇÃO\s+DA\s+OBRA|UFVia)/i,
+  );
+  let fiscal = '';
+  if (fiscalSection) {
+    // Procurar nomes de pessoa (não organizações) — duas ou mais palavras em maiúsculas
+    // sem COORDENAÇÃO, SUPERINTENDÊNCIA, SEDE, DIRETORIA etc.
+    const lines = fiscalSection[1].split('\n').map((l) => l.trim()).filter(Boolean);
+    for (const line of lines) {
+      if (
+        /^[A-ZÁÀÃÂÉÊÍÓÔÕÚÇ][A-ZÁÀÃÂÉÊÍÓÔÕÚÇ\s]{5,}$/.test(line) &&
+        !/(COORD|SUPER|SEDE|DIRET|GERÊN|UNID|GESTÃO|OPERAÇ|SUBST)/i.test(line)
+      ) {
+        fiscal = line;
+        break;
+      }
+    }
+  }
+
+  // Localização — UF, rodovia, extensão, trecho
+  const locSection = text.match(
+    /LOCALIZAÇÃO\s+DA\s+OBRA\s*([\s\S]*?)(?:Extensão\s+Total|Solicitado\s+por)/i,
+  );
+  const locText = locSection?.[1] || '';
+
+  // UF — 2 letras seguidas de "null" ou "BR-" na seção de localização
+  const ufMatch = locText.match(/([A-Z]{2})(?:null|BR-)/);
+  const uf = ufMatch?.[1] || '';
+
+  // Rodovias — BR-XXX (pode vir como "nullBR-163" no PDF)
+  const rodovias = [...locText.matchAll(/(BR-\d{3})/g)].map((m) => m[1]);
+  const rodoviasUnicas = [...new Set(rodovias)];
+  const rodovia = rodoviasUnicas.join(', ');
+
+  // Extensão Total
+  const extMatch = text.match(/Extensão\s+Total\s*([\d.,]+)/);
+  const extensao = extMatch?.[1] || '';
+
+  // Trecho — descrição do segmento (texto descritivo após os números de km)
+  // O texto tem padrão: "0,000,000,00Trecho descritivo aqui"
+  const trechoMatch = locText.match(
+    /\d+,\d+([A-ZÁÀÃÂÉÊÍÓÔÕÚÇ].+?)(?:\nPNV|$)/m,
+  );
+  const trecho = trechoMatch?.[1]?.replace(/\s+/g, ' ').trim() || '';
+
+  // ── Datas ──
+  // A seção DATAS tem labels em coluna e valores em coluna separada.
+  // Padrão: "Data da Publicação\nData da Aprovação\nData da Proposta\nData da Assinatura\nDD/MM/YYYY\n..."
+  // Extrair as 4 datas após os 4 labels
+  const datasSection = text.match(
+    /Data\s+da\s+Publicação\s*\n[\s\S]*?Data\s+da\s+Assinatura\s*\n([\s\S]*?)(?:Data-Base|REAJUST)/i,
+  );
+  let dataAssinatura = '';
+  if (datasSection) {
+    const dates = datasSection[1].match(/\d{2}\/\d{2}\/\d{4}/g) || [];
+    // Ordem: Publicação, Aprovação, Proposta, Assinatura
+    dataAssinatura = dates[3] || dates[dates.length - 1] || '';
+  }
+  // Fallback: procurar "Data da Assinatura" seguida de data diretamente
+  if (!dataAssinatura) {
+    const m = text.match(/Data\s+da\s+Assinatura\s*\n?\s*(\d{2}\/\d{2}\/\d{4})/);
+    dataAssinatura = m?.[1] || '';
+  }
+
+  // Início e Término dos Serviços
+  // Na seção PRAZO, o texto lineariza colunas de forma imprevisível.
+  // Estratégia: extrair TODAS as datas entre "PRAZO DE EXECUÇÃO" e "FONTE DE RECURSOS"
+  // e usar posição + contexto.
+  const prazoSection = text.match(
+    /PRAZO\s+DE\s+EXECUÇÃO\s*([\s\S]*?)(?:FONTE\s+DE\s+RECURSOS|REAJUST)/i,
+  );
+  let dataInicio = '';
+  let dataFim = '';
+  let prazoOriginal = '';
+  let prazoAtual = '';
+
+  if (prazoSection) {
+    const pText = prazoSection[1];
+    const allDates = pText.match(/\d{2}\/\d{2}\/\d{4}/g) || [];
+    // A data mais antiga é geralmente o início, a mais recente o término
+    if (allDates.length >= 2) {
+      const parsed = allDates.map((d) => {
+        const [dd, mm, yy] = d.split('/');
+        return { str: d, ts: new Date(`${yy}-${mm}-${dd}`).getTime() };
+      });
+      parsed.sort((a, b) => a.ts - b.ts);
+      dataInicio = parsed[0].str;
+      dataFim = parsed[parsed.length - 1].str;
+    } else if (allDates.length === 1) {
+      dataInicio = allDates[0];
+    }
+
+    // Prazo em dias
+    const diasMatch = pText.match(/(\d+)\s*\n?\s*Nº\s+dias\s+para\s+a\s+Execução/);
+    prazoAtual = diasMatch?.[1] || '';
+    const diasOrigMatch = pText.match(
+      /Nº\s+dias\s+\(Prazo\s+de\s+Execução\)\s*\n?\s*(?:CORRIDOS|ÚTEIS)\s*\n[\s\S]*?(\d{3,})/,
+    );
+    prazoOriginal = diasOrigMatch?.[1] || prazoAtual;
+  }
+
+  // Fallback para datas via Vigência
+  if (!dataInicio || !dataFim) {
+    const vigenciaMatch = text.match(
+      /Início\s+da\s+Vigência\s*(\d{2}\/\d{2}\/\d{4})/,
+    );
+    if (vigenciaMatch && !dataInicio) dataInicio = vigenciaMatch[1];
+  }
+
+  // Valores
+  const valorOrigMatch = text.match(
+    /Preço\s+Inicial\s*\n?\s*PI\s+Vigente\s*\n?\s*([\d.,]+)/,
+  );
+  const valorOriginal = valorOrigMatch?.[1] || '';
+
+  const valorAtualMatch = text.match(/Total\s+\(PI\s*\+\s*R\)\s*([\d.,]+)/);
+  const valorAtual = valorAtualMatch?.[1] || '';
+
+  // Superintendência / unidade fiscalização
+  const superMatch = text.match(
+    /Unid\.\s+Resp\.\s+Fiscalização\s*\n?\s*(.+?)(?:\n|Fiscal)/,
+  );
+  const superintendencia = superMatch?.[1]?.trim() || '';
+
+  // Campos extras para debug
+  campos['edital'] =
+    text.match(/Nº\s+do\s+Edital\s*([\d/.-]+)/)?.[1] || '';
+  campos['processo'] =
+    text.match(/[\d.]+\/\d{4}-\d{2}/)?.[0] || '';
+  campos['lei'] = text.match(/(\d+\.\d+\/\d{4})\s*Lei/)?.[1] || '';
+  campos['regime'] =
+    text.match(/Regime\s+Execução\s*(.+?)(?:\n|Objeto)/)?.[1]?.trim() || '';
+  campos['desempenho'] =
+    text.match(/([\d.,]+)\s*Desempenho\s+Contratual/)?.[1] || '';
+
+  return {
+    contrato,
+    objeto,
+    empresa,
+    cnpj,
+    fiscal,
+    superintendencia,
+    rodovia,
+    uf,
+    extensao,
+    trecho,
+    valor_original: valorOriginal,
+    valor_atual: valorAtual,
+    data_assinatura: dataAssinatura,
+    data_inicio: dataInicio,
+    data_fim: dataFim,
+    prazo_original: prazoOriginal,
+    prazo_atual: prazoAtual,
+    situacao,
+    tipo_contrato: tipoContrato,
+    campos_extras: campos,
+    aditivos: [], // Aditivos não aparecem na ficha PDF deste formato
+  };
+}
+
+/**
+ * Parseia o texto extraído do PDF do Resumo do Contrato.
+ *
+ * O PDF header tem:
+ *   "NN NNNNN/YYYY\nEMPRESA LTDA\nRESUMO DO CONTRATO\nContrato:\nEmpresa:"
+ * Os valores (contrato, empresa) aparecem ANTES dos labels no header.
+ * A planilha tem itens por lote, cada lote repete os mesmos códigos.
+ */
+function parsePDFResumoContrato(text: string): ResumoContrato {
+  const campos: Record<string, string> = {};
+
+  // Contrato — aparece no header antes de "RESUMO DO CONTRATO"
+  const contratoMatch = text.match(/\d{2}\s+(\d{5}\/\d{4})\s*\n/);
+  const contrato = contratoMatch?.[1] || '';
+
+  // Empresa — aparece na linha após o número do contrato
+  const empresaMatch = text.match(/\d{2}\s+\d{5}\/\d{4}\s*\n(.+?)\s*\n/);
+  const empresa = empresaMatch?.[1]?.trim() || '';
+
+  // Unidades
+  const unidFiscMatch = text.match(
+    /Unidade\s+Resp\.\s+pela\s+Fiscalização:\s*\n?\s*(.+?)(?:\n|Unidade)/,
+  );
+  campos['unid_fiscalizacao'] = unidFiscMatch?.[1]?.trim() || '';
+
+  // Itens da planilha — organizado por LOTES
+  // Cada item aparece como: código\ndescrição\nvalor\nunidade\nSICRO\nqtde\npreço_unit\nNão
+  const itens: ResumoContrato['itens'] = [];
+
+  // Dividir texto por lotes para preservar agrupamento
+  const loteRegex = /(\d+\s*-\s*LOTE\s+\d+)/g;
+  const lotes = text.split(loteRegex);
+
+  // Item regex para cada bloco
+  const itemRegex =
+    /(\d{5})\s*\n([A-ZÁÀÃÂÉÊÍÓÔÕÚÇ\s]+?)\s*\n([\d.,]+)\s*\n(\w+)\s*\n([\w-]+)\s*\n([\d.,]+)\s*\n([\d.,]+)\s*\n(?:Não|Sim)/g;
+
+  let loteAtual = '';
+  for (let i = 0; i < lotes.length; i++) {
+    const part = lotes[i];
+    const loteMatch = part.match(/(\d+)\s*-\s*LOTE\s+(\d+)/);
+    if (loteMatch) {
+      loteAtual = `LOTE ${loteMatch[2]}`;
+      continue;
+    }
+
+    let m;
+    while ((m = itemRegex.exec(part)) !== null) {
+      itens.push({
+        numero: m[1],
+        descricao: loteAtual ? `[${loteAtual}] ${m[2].trim()}` : m[2].trim(),
+        unidade: m[4],
+        quantidade: m[6],
+        preco_unitario: m[7],
+        valor_total: m[3],
+      });
+    }
+    // Reset lastIndex for next lote
+    itemRegex.lastIndex = 0;
+  }
+
+  // Total value — last big number on "Total" line
+  const totalMatch = text.match(/Total\s*\n[\s\S]*?([\d.,]{10,})\s*\n/);
+  const valorContrato = totalMatch?.[1] || '';
+
+  return {
+    contrato,
+    empresa,
+    cnpj: '',
+    rodovia: '',
+    uf: '',
+    extensao: '',
+    trecho: '',
+    objeto: '',
+    valor_contrato: valorContrato,
+    valor_atual: valorContrato,
+    situacao: '',
+    data_assinatura: '',
+    itens,
+    campos_extras: campos,
+  };
 }
 
 /* ══════════════════════════════════════════
