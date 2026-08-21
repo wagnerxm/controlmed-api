@@ -30,6 +30,7 @@ import { syncRouter } from './routes/sync.js';
 import { rodoviasRouter } from './routes/rodovias.js';
 import { uploadRouter } from './routes/upload.js';
 import { siacRouter } from './routes/siac.js';
+import { adminRouter } from './routes/admin.js';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
@@ -48,6 +49,13 @@ app.use('/api/sync', syncRouter);
 app.use('/api/rodovias', rodoviasRouter);
 app.use('/api/upload', uploadRouter);
 app.use('/api/siac', siacRouter);
+app.use('/api/admin', adminRouter);
+
+/* ── Painel admin (HTML estático) ── */
+import path from 'path';
+import { fileURLToPath } from 'url';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+app.use('/admin', express.static(path.join(__dirname, '..', 'public', 'admin')));
 
 /* ── Health check ── */
 app.get('/api/health', (_req, res) => {
@@ -79,6 +87,30 @@ async function runMigrations() {
     await p.query(`CREATE UNIQUE INDEX idx_rodovias_br_uf_tipo_snv ON rodovias(br, uf, tipo_tr, versao_snv)`);
     await p.query(`CREATE INDEX IF NOT EXISTS idx_rodovias_tipo ON rodovias(tipo_tr)`);
     console.log('✅ Migração 003 concluída');
+  }
+
+  // 004: tabela kmcheck_devices para rastrear aparelhos
+  const devTbl = await p.query(`
+    SELECT 1 FROM information_schema.tables
+    WHERE table_name = 'kmcheck_devices'
+  `);
+  if (!devTbl.rowCount) {
+    console.log('🔧 Migração 004: criando tabela kmcheck_devices...');
+    await p.query(`
+      CREATE TABLE kmcheck_devices (
+        device_id    VARCHAR(64) PRIMARY KEY,
+        app_version  VARCHAR(16),
+        platform     VARCHAR(32),
+        user_agent   TEXT,
+        screen_info  VARCHAR(32),
+        first_seen   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_seen    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        total_pings  INTEGER NOT NULL DEFAULT 1
+      )
+    `);
+    await p.query(`CREATE INDEX idx_devices_last_seen ON kmcheck_devices(last_seen DESC)`);
+    await p.query(`CREATE INDEX idx_devices_version ON kmcheck_devices(app_version)`);
+    console.log('✅ Migração 004 concluída');
   }
 }
 

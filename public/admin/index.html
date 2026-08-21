@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KMCheck — Painel Admin</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#e6edf3;--mut:#8b949e;--green:#3fb950;--yellow:#d29922;--red:#f85149;--blue:#58a6ff;--purple:#bc8cff;--gold:#f0c040;--sans:system-ui,-apple-system,sans-serif}
+body{font-family:var(--sans);background:var(--bg);color:var(--text);line-height:1.5;min-height:100vh}
+header{background:linear-gradient(135deg,#1a1f2e,#0d1117);border-bottom:1px solid var(--border);padding:20px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+header h1{font-size:22px;font-weight:700;color:var(--gold)}
+header h1 span{font-weight:400;color:var(--mut);font-size:14px;margin-left:8px}
+header .server-time{margin-left:auto;font-size:12px;color:var(--mut)}
+.container{max-width:1200px;margin:0 auto;padding:20px}
+.grid{display:grid;gap:16px;margin-bottom:24px}
+.grid-4{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.grid-3{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.grid-2{grid-template-columns:repeat(auto-fit,minmax(350px,1fr))}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;position:relative;overflow:hidden}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;color:var(--mut);margin-bottom:12px;font-weight:600}
+.card .big{font-size:36px;font-weight:700;line-height:1}
+.card .sub{font-size:13px;color:var(--mut);margin-top:4px}
+.card .big.green{color:var(--green)}
+.card .big.blue{color:var(--blue)}
+.card .big.purple{color:var(--purple)}
+.card .big.gold{color:var(--gold)}
+.card .big.red{color:var(--red)}
+.section-title{font-size:11px;text-transform:uppercase;letter-spacing:.2em;color:var(--mut);margin:28px 0 12px;font-weight:600;border-bottom:1px solid var(--border);padding-bottom:8px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);padding:8px 10px;border-bottom:1px solid var(--border);font-weight:600;position:sticky;top:0;background:var(--card)}
+td{padding:7px 10px;border-bottom:1px solid rgba(48,54,61,.5);vertical-align:top}
+tr:hover td{background:rgba(88,166,255,.04)}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600}
+.badge.ok{background:rgba(63,185,80,.15);color:var(--green)}
+.badge.warn{background:rgba(210,153,34,.15);color:var(--yellow)}
+.badge.err{background:rgba(248,81,73,.15);color:var(--red)}
+.badge.info{background:rgba(88,166,255,.15);color:var(--blue)}
+.badge.tipo{background:rgba(188,140,255,.12);color:var(--purple);margin:0 2px}
+.scroll-table{max-height:420px;overflow-y:auto;border-radius:8px;border:1px solid var(--border)}
+.bar-chart{display:flex;align-items:end;gap:6px;height:80px;margin-top:8px}
+.bar-chart .bar{flex:1;min-width:12px;border-radius:4px 4px 0 0;background:var(--blue);position:relative;transition:height .3s}
+.bar-chart .bar:hover{opacity:.8}
+.bar-chart .bar .label{position:absolute;bottom:-18px;left:50%;transform:translateX(-50%);font-size:9px;color:var(--mut);white-space:nowrap}
+.bar-chart .bar .val{position:absolute;top:-16px;left:50%;transform:translateX(-50%);font-size:10px;color:var(--text);font-weight:600}
+.login-box{max-width:360px;margin:100px auto;text-align:center}
+.login-box input{width:100%;padding:12px;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:15px;margin:12px 0}
+.login-box button{width:100%;padding:12px;background:var(--gold);color:#0d0f08;border:none;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer}
+.login-box button:hover{opacity:.9}
+#loading{text-align:center;padding:60px;color:var(--mut);font-size:15px}
+.hidden{display:none!important}
+.refresh-btn{background:var(--card);border:1px solid var(--border);color:var(--blue);padding:6px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600}
+.refresh-btn:hover{background:rgba(88,166,255,.1)}
+@media(max-width:600px){.container{padding:12px}.grid-4{grid-template-columns:1fr 1fr}.card .big{font-size:28px}}
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-screen" class="login-box">
+  <h1 style="color:var(--gold);font-size:24px;margin-bottom:8px">🔑 KMCheck Admin</h1>
+  <p style="color:var(--mut);font-size:13px">Insira a chave de administrador</p>
+  <input type="password" id="admin-key" placeholder="Chave admin" autofocus>
+  <button onclick="doLogin()">Entrar</button>
+  <p id="login-err" style="color:var(--red);font-size:13px;margin-top:8px" class="hidden"></p>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard" class="hidden">
+<header>
+  <h1>📊 KMCheck Admin <span>Painel de Monitoramento</span></h1>
+  <button class="refresh-btn" onclick="loadDashboard()">↻ Atualizar</button>
+  <div class="server-time" id="server-time"></div>
+</header>
+
+<div class="container">
+  <!-- KPIs -->
+  <div id="loading">Carregando dados...</div>
+
+  <div id="kpis" class="grid grid-4 hidden"></div>
+
+  <!-- Dispositivos -->
+  <div id="devices-section" class="hidden">
+    <div class="section-title">📱 Dispositivos — KMCheck em uso</div>
+    <div class="grid grid-3" id="device-cards"></div>
+    <div class="card" style="margin-bottom:24px">
+      <h2>Todos os dispositivos</h2>
+      <div class="scroll-table">
+        <table id="device-table">
+          <thead><tr><th>Dispositivo</th><th>Versão</th><th>Plataforma</th><th>Tela</th><th>Último acesso</th><th>Acessos</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- SNV -->
+  <div id="snv-section" class="hidden">
+    <div class="section-title">🗺️ Versões SNV — Status de importação</div>
+    <div class="grid grid-2" id="snv-charts"></div>
+    <div class="card">
+      <h2>Todas as versões SNV</h2>
+      <div class="scroll-table" style="max-height:600px">
+        <table id="snv-table">
+          <thead><tr><th>Versão</th><th>Label</th><th>Status</th><th>Rodovias</th><th>BRs</th><th>Tipos</th><th>Data</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+const API = location.origin + '/api/admin';
+let KEY = localStorage.getItem('kmcheck-admin-key') || '';
+
+function doLogin() {
+  KEY = document.getElementById('admin-key').value.trim();
+  if (!KEY) return;
+  localStorage.setItem('kmcheck-admin-key', KEY);
+  document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('dashboard').classList.remove('hidden');
+  loadDashboard();
+}
+
+// Auto-login se já tem chave
+if (KEY) {
+  document.getElementById('login-screen').classList.add('hidden');
+  document.getElementById('dashboard').classList.remove('hidden');
+  loadDashboard();
+}
+
+// Também aceita Enter no campo
+document.getElementById('admin-key').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin() });
+
+async function loadDashboard() {
+  const loading = document.getElementById('loading');
+  loading.classList.remove('hidden');
+  try {
+    const r = await fetch(`${API}/dashboard?key=${encodeURIComponent(KEY)}`);
+    if (r.status === 403) {
+      localStorage.removeItem('kmcheck-admin-key');
+      document.getElementById('dashboard').classList.add('hidden');
+      document.getElementById('login-screen').classList.remove('hidden');
+      document.getElementById('login-err').textContent = 'Chave inválida';
+      document.getElementById('login-err').classList.remove('hidden');
+      return;
+    }
+    const d = await r.json();
+    loading.classList.add('hidden');
+    renderKpis(d);
+    renderDevices(d);
+    renderSnv(d);
+    document.getElementById('server-time').textContent = 'Atualizado: ' + new Date(d.serverTime).toLocaleString('pt-BR');
+  } catch (err) {
+    loading.textContent = '❌ Erro ao carregar: ' + err.message;
+  }
+}
+
+function renderKpis(d) {
+  const el = document.getElementById('kpis');
+  el.classList.remove('hidden');
+  const r = d.resumo || {};
+  const ds = d.deviceStats || {};
+  el.innerHTML = `
+    <div class="card"><h2>Versões SNV</h2><div class="big blue">${r.total_versoes || 0}</div><div class="sub">${r.versao_mais_antiga || '—'} a ${r.versao_mais_recente || '—'}</div></div>
+    <div class="card"><h2>Total rodovias</h2><div class="big green">${Number(r.total_rodovias || 0).toLocaleString('pt-BR')}</div><div class="sub">${r.total_brs || 0} BRs · ${r.total_ufs || 0} UFs</div></div>
+    <div class="card"><h2>Dispositivos</h2><div class="big purple">${ds.total || 0}</div><div class="sub">${ds.ativos_24h || 0} hoje · ${ds.ativos_7d || 0} sem. · ${ds.ativos_30d || 0} mês</div></div>
+    <div class="card"><h2>Versões do App</h2><div class="big gold">${ds.versoes_app || 0}</div><div class="sub">${ds.plataformas || 0} plataformas</div></div>
+  `;
+}
+
+function timeAgo(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return 'agora';
+  if (diff < 3600) return Math.floor(diff / 60) + 'min atrás';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h atrás';
+  if (diff < 604800) return Math.floor(diff / 86400) + 'd atrás';
+  return d.toLocaleDateString('pt-BR');
+}
+
+function renderDevices(d) {
+  const sec = document.getElementById('devices-section');
+  sec.classList.remove('hidden');
+
+  // Cards de distribuição
+  const cards = document.getElementById('device-cards');
+  const vd = d.versionDist || [];
+  const pd = d.platformDist || [];
+
+  cards.innerHTML = `
+    <div class="card">
+      <h2>Por versão do app</h2>
+      ${vd.length ? vd.map(v => `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)"><span style="color:var(--blue)">v${v.app_version}</span><span style="font-weight:600">${v.qty}</span></div>`).join('') : '<div style="color:var(--mut)">Sem dados</div>'}
+    </div>
+    <div class="card">
+      <h2>Por plataforma</h2>
+      ${pd.length ? pd.map(p => `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)"><span>${platformIcon(p.platform)} ${p.platform}</span><span style="font-weight:600">${p.qty}</span></div>`).join('') : '<div style="color:var(--mut)">Sem dados</div>'}
+    </div>
+    <div class="card">
+      <h2>Atividade</h2>
+      <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)"><span>Últimas 24h</span><span class="badge ok">${d.deviceStats?.ativos_24h || 0}</span></div>
+      <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)"><span>Últimos 7 dias</span><span class="badge info">${d.deviceStats?.ativos_7d || 0}</span></div>
+      <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border)"><span>Últimos 30 dias</span><span class="badge warn">${d.deviceStats?.ativos_30d || 0}</span></div>
+      <div style="display:flex;justify-content:space-between;padding:4px 0"><span>Total registrados</span><span style="font-weight:700">${d.deviceStats?.total || 0}</span></div>
+    </div>
+  `;
+
+  // Tabela de dispositivos
+  const tbody = document.querySelector('#device-table tbody');
+  const devs = d.devices || [];
+  tbody.innerHTML = devs.length ? devs.map(dev => `<tr>
+    <td title="${dev.device_id}" style="font-family:monospace;font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis">${dev.device_id.substring(0,12)}…</td>
+    <td><span class="badge info">v${dev.app_version || '?'}</span></td>
+    <td>${platformIcon(dev.platform)} ${dev.platform || '—'}</td>
+    <td style="font-size:11px">${dev.screen_info || '—'}</td>
+    <td title="${dev.last_seen}">${timeAgo(dev.last_seen)}</td>
+    <td style="text-align:center;font-weight:600">${dev.total_pings}</td>
+  </tr>`).join('') : '<tr><td colspan="6" style="text-align:center;color:var(--mut);padding:30px">Nenhum dispositivo registrado ainda</td></tr>';
+}
+
+function platformIcon(p) {
+  if (!p) return '📱';
+  const l = p.toLowerCase();
+  if (l.includes('iphone') || l.includes('ios')) return '🍎';
+  if (l.includes('android')) return '🤖';
+  if (l.includes('windows')) return '🖥️';
+  if (l.includes('mac')) return '💻';
+  if (l.includes('linux')) return '🐧';
+  return '📱';
+}
+
+function renderSnv(d) {
+  const sec = document.getElementById('snv-section');
+  sec.classList.remove('hidden');
+
+  // Charts de resumo
+  const charts = document.getElementById('snv-charts');
+  const stats = d.rodoviaStats || [];
+  const versions = d.snvVersions || [];
+  const ok = versions.filter(v => v.status === 'concluido').length;
+  const pending = versions.filter(v => v.status !== 'concluido').length;
+
+  charts.innerHTML = `
+    <div class="card">
+      <h2>Status de importação</h2>
+      <div style="display:flex;gap:20px;align-items:center;margin-bottom:12px">
+        <div><div class="big green">${ok}</div><div class="sub">Completas</div></div>
+        <div><div class="big ${pending ? 'red' : 'green'}">${pending}</div><div class="sub">Pendentes</div></div>
+        <div><div class="big blue">${versions.length}</div><div class="sub">Total</div></div>
+      </div>
+      <div style="background:var(--border);border-radius:999px;height:8px;overflow:hidden">
+        <div style="background:var(--green);height:100%;width:${versions.length ? (ok / versions.length * 100) : 0}%;border-radius:999px;transition:width .5s"></div>
+      </div>
+      <div class="sub" style="margin-top:4px">${versions.length ? Math.round(ok / versions.length * 100) : 0}% concluído</div>
+    </div>
+    <div class="card">
+      <h2>Evolução de rodovias por versão</h2>
+      <div class="bar-chart">
+        ${stats.slice(0, 20).reverse().map(s => {
+          const max = Math.max(...stats.map(x => Number(x.total_rodovias)));
+          const h = max ? (Number(s.total_rodovias) / max * 70) : 0;
+          return `<div class="bar" style="height:${h}px" title="${s.versao_snv}: ${s.total_rodovias} rodovias"><div class="val">${s.total_rodovias}</div><div class="label">${s.versao_snv.substring(2,4)}/${s.versao_snv.substring(4,6)}</div></div>`;
+        }).join('')}
+      </div>
+      <div class="sub" style="margin-top:24px">Últimas 20 versões — rodovias por versão SNV</div>
+    </div>
+  `;
+
+  // Tabela SNV
+  const tbody = document.querySelector('#snv-table tbody');
+  // Combinar dados de versoes com stats
+  const statsMap = {};
+  stats.forEach(s => { statsMap[s.versao_snv] = s });
+
+  tbody.innerHTML = versions.map(v => {
+    const s = statsMap[v.id] || {};
+    const isOk = v.status === 'concluido';
+    const tipos = s.tipos || [];
+    return `<tr>
+      <td style="font-family:monospace;font-weight:600">${v.id}</td>
+      <td>${v.label || '—'}</td>
+      <td><span class="badge ${isOk ? 'ok' : 'warn'}">${isOk ? '✓ Completa' : '⏳ ' + (v.status || 'pendente')}</span></td>
+      <td style="font-weight:600">${s.total_rodovias || v.total_rodovias || 0}</td>
+      <td>${s.total_brs || '—'}</td>
+      <td>${tipos.length ? tipos.map(t => `<span class="badge tipo">${t}</span>`).join('') : '—'}</td>
+      <td style="font-size:11px;color:var(--mut)">${v.created_at ? new Date(v.created_at).toLocaleDateString('pt-BR') : '—'}</td>
+    </tr>`;
+  }).join('');
+}
+</script>
+</body>
+</html>
